@@ -1,13 +1,10 @@
-from fastapi import Depends, FastAPI
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import FastAPI
+from app.modules.users.router import router as users_router
 
-from app.core.database import get_db
+app = FastAPI()
 
+app.include_router(users_router)
 
-app = FastAPI(title="Drum Notation API")
-
-
-@app.get("/health")
-async def health_check(db: AsyncSession = Depends(get_db)):
-    return {"status": "ok"}
-
+@app.get("/")
+async def root():
+    return {"message": "Welcome to Drum Notation Backend"}

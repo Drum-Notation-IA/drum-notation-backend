@@ -1,29 +1,32 @@
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy import text
-
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import sessionmaker, declarative_base
 from app.core.config import settings
 
-
+# Create async engine
 engine = create_async_engine(
-    settings.DATABASE_URL,
-    echo=False,
+    settings.DATABASE_URL_ASYNC,
+    echo=True,  # Set to False in production
     future=True,
 )
 
+# Create async session factory
 AsyncSessionLocal = sessionmaker(
     engine,
-    expire_on_commit=False,
     class_=AsyncSession,
+    expire_on_commit=False,
 )
 
+# Base class for models
+Base = declarative_base()
 
+# Dependency for FastAPI
 async def get_db():
     async with AsyncSessionLocal() as session:
         try:
-            await session.execute(text("SELECT 1"))
-            print("🔗 Database connection successful")
-        except Exception as e:
-            print(f"⚠️ Database connection failed: {e}")
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
             raise
-        yield session
+        finally:
+            await session.close()
