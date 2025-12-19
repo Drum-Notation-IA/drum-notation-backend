@@ -1,138 +1,206 @@
-# 🥁 AI-Powered Drum Transcription System
+# Drum Notation Backend - Project Structure
 
-## 🎯 Overview
-An intelligent system that transcribes drum performances into musical notation using AI/ML. Instead of traditional audio frequency analysis, this project leverages deep learning to identify and separate individual drum instruments for higher accuracy.
+## 📁 **Clean Project Overview**
 
-## ✨ Features
+This document outlines the clean, organized structure of the Drum Notation ML Backend after removing unnecessary files and optimizing for development.
 
-- **AI-Powered Detection** - Uses machine learning to identify drum hits with higher accuracy than traditional FFT-based methods
-- **Instrument Separation** - Isolates individual drum components (snare, kick, hi-hat, etc.) before transcription
-- **Real-time Processing** - Processes video/audio input with low latency
-- **Interactive Frontend** - Visualizes drum notation in real-time
-- **Database Backend** - PostgreSQL for efficient storage and retrieval of transcriptions
+```
+Drum-Notation-Backend/
+├── 📁 alembic/                    # Database migrations
+│   ├── versions/
+│   ├── env.py
+│   └── script.py.mako
+├── 📁 app/                        # Main application code
+│   ├── 📁 core/                   # Core functionality
+│   │   ├── config.py              # Configuration settings
+│   │   ├── database.py            # Database connection & session
+│   │   ├── dependencies.py        # FastAPI dependencies (auth, etc.)
+│   │   ├── password_utils.py      # Password validation utilities
+│   │   └── security.py            # Authentication & password hashing
+│   ├── 📁 db/                     # Database models base
+│   │   └── base.py                # SQLAlchemy base class
+│   ├── 📁 modules/                # Feature modules
+│   │   ├── 📁 audio_processing/   # Audio ML processing
+│   │   │   ├── detection.py       # Drum hit detection
+│   │   │   ├── separation.py      # Audio source separation
+│   │   │   └── service.py         # Audio processing service
+│   │   ├── 📁 jobs/               # Background job processing
+│   │   │   ├── models.py          # Job status models
+│   │   │   ├── router.py          # Job API endpoints
+│   │   │   └── worker.py          # Background workers
+│   │   ├── 📁 media/              # File upload & storage
+│   │   │   ├── models.py          # Video/Audio file models
+│   │   │   ├── router.py          # Upload API endpoints
+│   │   │   ├── schemas.py         # Media data schemas
+│   │   │   ├── service.py         # Media processing service
+│   │   │   └── storage.py         # File storage utilities
+│   │   ├── 📁 notation/           # Musical notation generation
+│   │   │   ├── models.py          # Notation data models
+│   │   │   ├── router.py          # Notation API endpoints
+│   │   │   ├── schemas.py         # Notation data schemas
+│   │   │   └── service.py         # Notation generation service
+│   │   ├── 📁 users/              # User management (COMPLETE ✅)
+│   │   │   ├── __init__.py        # Module exports
+│   │   │   ├── models.py          # User database model
+│   │   │   ├── repository.py      # Data access layer
+│   │   │   ├── router.py          # API endpoints
+│   │   │   ├── schemas.py         # Request/response models
+│   │   │   └── service.py         # Business logic
+│   │   ├── 📁 vision/             # Computer vision (pose detection)
+│   │   │   ├── mediapipe.py       # MediaPipe implementation
+│   │   │   └── openpose.py        # OpenPose implementation
+│   │   └── 📁 workers/            # Celery workers
+│   │       └── celery_app.py      # Celery configuration
+│   ├── 📁 shared/                 # Shared utilities
+│   │   └── base_model.py          # Base model with timestamps & soft delete
+│   ├── __init__.py                # App package init
+│   └── main.py                    # FastAPI application entry point
+├── 📁 tests/                      # Test files
+│   └── test_users.py              # User module tests
+├── 📁 dnvenv/                     # Virtual environment (gitignored)
+├── .env                           # Environment variables (gitignored)
+├── .env.example                   # Environment variables template
+├── .gitignore                     # Git ignore rules
+├── alembic.ini                    # Alembic configuration
+├── README.md                      # Project documentation
+└── requirements.txt               # Python dependencies
+```
 
-## 🛠 Tech Stack
+## 🎯 **Module Status**
 
-### Backend
-- **Python 3.10+**
-- **FastAPI** - Modern, fast web framework
-- **SQLAlchemy** - ORM for database interactions
-- **PostgreSQL** - Primary database
-- **Celery** - For background processing tasks
+| Module | Status | Description |
+|--------|--------|-------------|
+| **Users** | ✅ **COMPLETE** | Full CRUD, authentication, JWT tokens |
+| **Audio Processing** | 🟡 Skeleton | ML models for drum detection |
+| **Jobs** | 🟡 Skeleton | Background processing queue |
+| **Media** | 🟡 Skeleton | File upload and storage |
+| **Notation** | 🟡 Skeleton | Musical notation generation |
+| **Vision** | 🟡 Skeleton | Pose detection for drumming |
 
-### AI/ML Components
-- **Librosa** - Audio analysis
-- **PyTorch** - Deep learning framework
-- **Spleeter** - For source separation
-- **OpenCV** - Video processing
+## 🔧 **Core Components**
 
-### Frontend
-- **React.js** - Frontend framework
-- **VexFlow** - Music notation rendering
-- **Web Audio API** - For audio visualization
+### **Configuration (`app/core/config.py`)**
+- Environment-based settings
+- Database URLs, JWT secrets
+- Auto-generates secure keys in development
 
-## 🚀 Getting Started
+### **Database (`app/core/database.py`)**
+- Async PostgreSQL connection
+- Session management
+- Connection pooling
 
-### Prerequisites
-- Python 3.10+
-- PostgreSQL 14+
-- Node.js 16+
-- FFmpeg
+### **Security (`app/core/security.py`)**
+- bcrypt password hashing
+- JWT token generation/validation
+- Handles 72-byte bcrypt limitation
 
-### Installation
+### **Authentication (`app/core/dependencies.py`)**
+- JWT token validation
+- Current user dependency injection
+- Optional authentication support
 
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/yourusername/drum-ai-transcriber.git
-   cd drum-notation-backend
-   ```
+## 👤 **Users Module (Complete)**
 
-2. **Set up Python environment**
-   ```bash
-   python -m venv venv
-   # On Windows:
-   .\venv\Scripts\activate
-   # On macOS/Linux:
-   source venv/bin/activate
-   ```
+The users module is fully implemented with:
 
-3. **Install dependencies**
+### **API Endpoints:**
+- `POST /users/register` - User registration
+- `POST /users/login` - Authentication
+- `GET /users/me` - Current user info
+- `PATCH /users/me` - Update profile
+- `POST /users/change-password` - Change password
+- `DELETE /users/me` - Delete account
+- `GET /users/` - List all users (admin)
+- And more...
+
+### **Features:**
+- ✅ User registration with email validation
+- ✅ Secure password hashing (bcrypt)
+- ✅ JWT-based authentication
+- ✅ Complete CRUD operations
+- ✅ Soft delete functionality
+- ✅ Password change with validation
+- ✅ Email uniqueness enforcement
+- ✅ Async database operations
+
+## 🗃️ **Database Schema**
+
+The database is designed for the complete drum notation system:
+
+```sql
+-- Users (implemented)
+users (id, email, password_hash, created_at, updated_at, deleted_at)
+
+-- Videos (ready for implementation)
+videos (id, user_id, filename, storage_path, duration_seconds, ...)
+
+-- Audio Processing (ready for implementation)  
+audio_files (id, video_id, sample_rate, channels, ...)
+drum_events (id, audio_file_id, time_seconds, instrument, velocity, ...)
+
+-- Job Processing (ready for implementation)
+processing_jobs (id, video_id, job_type, status, progress, ...)
+
+-- Notation (ready for implementation)
+notations (id, video_id, tempo, time_signature, notation_json, ...)
+
+-- AI Enhancement (ready for implementation)
+openai_enrichments (id, notation_id, model, input_json, output_json, ...)
+```
+
+## 🚀 **Getting Started**
+
+1. **Install dependencies:**
    ```bash
    pip install -r requirements.txt
    ```
 
-4. **Set up environment variables**
-   Create a `.env` file in the root directory:
-   ```env
-   # Database
-   DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/drum_ai
-   
-   # AI/ML Settings
-   MODEL_PATH=./models/drum_transcriber.pth
-   
-   # App Settings
-   DEBUG=True
+2. **Set up environment:**
+   ```bash
+   cp .env.example .env
+   # Edit .env with your database credentials
    ```
 
-5. **Initialize database**
+3. **Run migrations:**
    ```bash
    alembic upgrade head
    ```
 
-6. **Start the development server**
+4. **Start the server:**
    ```bash
    uvicorn app.main:app --reload
    ```
 
-## 🎥 How It Works
+5. **Test the API:**
+   ```bash
+   curl -X POST "http://127.0.0.1:8000/users/register" \
+        -H "Content-Type: application/json" \
+        -d '{"email": "test@example.com", "password": "SecurePass123!"}'
+   ```
 
-1. **Input Processing**
-   - Accepts video/audio input
-   - Extracts audio track
-   
-2. **Source Separation**
-   - Uses AI to separate drum components
-   - Identifies individual drum instruments
-   
-3. **Transcription**
-   - Converts audio events to MIDI
-   - Maps to standard drum notation
-   
-4. **Visualization**
-   - Renders interactive drum notation
-   - Syncs with original audio
+## 📋 **Next Development Steps**
 
-## 📂 Project Structure
+1. **Media Module** - File upload and storage system
+2. **Audio Processing** - Integrate ML models for drum detection
+3. **Jobs Module** - Background processing with Celery
+4. **Vision Module** - Computer vision for drumstick tracking
+5. **Notation Module** - Generate musical notation from analysis
 
-```
-drum-notation-backend/
-├── app/
-│   ├── api/               # API routes
-│   ├── core/              # Core functionality
-│   ├── models/            # Database models
-│   ├── services/          # Business logic
-│   │   ├── audio/         # Audio processing
-│   │   ├── ai/            # ML models
-│   │   └── transcription/ # Notation logic
-│   └── main.py            # FastAPI app
-├── tests/                 # Test suite
-├── alembic/               # Database migrations
-├── .env                   # Environment variables
-└── requirements.txt       # Python dependencies
-```
+## 🧪 **Testing**
 
-## 🤝 Contributing
+- Run tests: `pytest tests/`
+- User module has comprehensive test coverage
+- Tests include CRUD operations, authentication, and error cases
 
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+## 🔒 **Security Features**
 
-## 📄 License
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+- bcrypt password hashing with 72-byte limit handling
+- JWT token authentication with configurable expiration
+- Input validation with Pydantic schemas
+- SQL injection protection with SQLAlchemy
+- Soft delete for data retention
+- Environment-based configuration
 
-## 🙏 Acknowledgments
-- [Librosa](https://librosa.org/) for audio analysis
-- [VexFlow](https://www.vexflow.com/) for music notation
-- [Spleeter](https://research.deezer.com/technology/spleeter/) for source separation
+---
+
+**Project Status**: User management complete ✅ | Ready for ML module development 🚀
