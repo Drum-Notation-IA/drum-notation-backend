@@ -183,3 +183,27 @@ audio_uploads/
 video_uploads/
 processed_audio/
 processed_video/
+
+# Testing and temporary development files
+test_*.py
+*_test.py
+verify_*.py
+debug_*.py
+*.backup
+*.bak
+*.orig
+*.old
+
+# Editor backup files
+*~
+.#*
+\#*\#
+
+# Development utilities
+scripts/test/
+scripts/debug/
+dev_tools/
+
+# Runtime files
+*.pid
+*.lock

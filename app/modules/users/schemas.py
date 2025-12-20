@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
@@ -41,6 +41,7 @@ class UserRead(UserBase):
     id: UUID
     created_at: datetime
     updated_at: datetime
+    roles: List["RoleRead"] = []  # Forward reference to avoid circular imports
 
     class Config:
         from_attributes = True
@@ -83,3 +84,10 @@ class Token(BaseModel):
 
 class TokenData(BaseModel):
     email: Optional[str] = None
+
+
+# Import at the end to avoid circular imports
+from app.modules.roles.schemas import RoleRead, UserRoleRead
+
+# Update forward reference
+UserRead.model_rebuild()

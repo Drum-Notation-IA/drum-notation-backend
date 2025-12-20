@@ -7,6 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.security import create_access_token, verify_password
+from app.modules.roles.schemas import RoleCreate, RoleRead, UserRoleRead
+from app.modules.roles.service import RoleService
 from app.modules.users.models import User
 from app.modules.users.repository import UserRepository
 from app.modules.users.schemas import (
@@ -22,6 +24,7 @@ from app.modules.users.schemas import (
 class UserService:
     def __init__(self):
         self.repo = UserRepository()
+        self.role_service = RoleService()
 
     async def create_user(self, db: AsyncSession, user_in: UserCreate) -> UserRead:
         """Create a new user"""
@@ -214,3 +217,41 @@ class UserService:
                 detail="User not found",
             )
         return user
+
+    # ==========================
+    # Role Management Methods
+    # ==========================
+
+    async def create_role(self, db: AsyncSession, role_in: RoleCreate) -> RoleRead:
+        """Create a new role"""
+        return await self.role_service.create_role(db, role_in)
+
+    async def get_all_roles(self, db: AsyncSession) -> List[RoleRead]:
+        """Get all roles"""
+        return await self.role_service.get_all_roles(db)
+
+    async def get_role(self, db: AsyncSession, role_id: UUID) -> RoleRead:
+        """Get role by ID"""
+        return await self.role_service.get_role(db, role_id)
+
+    async def assign_role_to_user(
+        self, db: AsyncSession, user_id: UUID, role_id: UUID
+    ) -> UserRoleRead:
+        """Assign a role to a user"""
+        return await self.role_service.assign_role_to_user(db, user_id, role_id)
+
+    async def remove_role_from_user(
+        self, db: AsyncSession, user_id: UUID, role_id: UUID
+    ) -> dict:
+        """Remove a role from a user"""
+        return await self.role_service.remove_role_from_user(db, user_id, role_id)
+
+    async def get_roles_for_user(
+        self, db: AsyncSession, user_id: UUID
+    ) -> List[RoleRead]:
+        """Get all roles assigned to a user"""
+        return await self.role_service.get_roles_for_user(db, user_id)
+
+    async def get_users_for_role(self, db: AsyncSession, role_id: UUID):
+        """Get all users assigned to a role"""
+        return await self.role_service.get_users_for_role(db, role_id)

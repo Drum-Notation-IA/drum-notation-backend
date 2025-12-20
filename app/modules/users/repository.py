@@ -4,6 +4,7 @@ from uuid import UUID
 
 from sqlalchemy import and_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.security import hash_password
 from app.modules.users.models import User
@@ -13,13 +14,21 @@ from app.modules.users.schemas import UserCreate, UserUpdate
 class UserRepository:
     async def get_by_id(self, db: AsyncSession, user_id: UUID) -> Optional[User]:
         """Get user by ID (excluding soft deleted)"""
-        query = select(User).where(and_(User.id == user_id, User.deleted_at.is_(None)))
+        query = (
+            select(User)
+            .where(and_(User.id == user_id, User.deleted_at.is_(None)))
+            .options(selectinload(User.roles))
+        )
         result = await db.execute(query)
         return result.scalar_one_or_none()
 
     async def get_by_email(self, db: AsyncSession, email: str) -> Optional[User]:
         """Get user by email (excluding soft deleted)"""
-        query = select(User).where(and_(User.email == email, User.deleted_at.is_(None)))
+        query = (
+            select(User)
+            .where(and_(User.email == email, User.deleted_at.is_(None)))
+            .options(selectinload(User.roles))
+        )
         result = await db.execute(query)
         return result.scalar_one_or_none()
 
@@ -31,7 +40,7 @@ class UserRepository:
         include_deleted: bool = False,
     ) -> List[User]:
         """Get all users with pagination"""
-        query = select(User)
+        query = select(User).options(selectinload(User.roles))
 
         if not include_deleted:
             query = query.where(User.deleted_at.is_(None))
@@ -46,6 +55,10 @@ class UserRepository:
         db.add(user)
         await db.flush()
         await db.refresh(user)
+
+        # For new users, manually set roles to empty list to avoid lazy loading
+        # This prevents SQLAlchemy from trying to query the roles relationship
+        user.__dict__["roles"] = []
         return user
 
     async def update(
@@ -73,7 +86,12 @@ class UserRepository:
         )
 
         result = await db.execute(query)
-        return result.scalar_one_or_none()
+        updated_user = result.scalar_one_or_none()
+
+        if updated_user:
+            # Reload the user with relationships
+            return await self.get_by_id(db, user_id)
+        return updated_user
 
     async def soft_delete(self, db: AsyncSession, user_id: UUID) -> bool:
         """Soft delete user by setting deleted_at timestamp"""
@@ -110,7 +128,16 @@ class UserRepository:
         )
 
         result = await db.execute(query)
-        return result.scalar_one_or_none()
+        restored_user = result.scalar_one_or_none()
+
+        if restored_user:
+            # Reload the user with relationships
+            query_with_roles = (
+                select(User).where(User.id == user_id).options(selectinload(User.roles))
+            )
+            result = await db.execute(query_with_roles)
+            return result.scalar_one_or_none()
+        return restored_user
 
     async def count(self, db: AsyncSession, include_deleted: bool = False) -> int:
         """Count total users"""
@@ -138,4 +165,10 @@ class UserRepository:
 
     async def authenticate(self, db: AsyncSession, email: str) -> Optional[User]:
         """Get user for authentication (returns user with password_hash)"""
-        return await self.get_by_email(db, email)
+        query = (
+            select(User)
+            .where(and_(User.email == email, User.deleted_at.is_(None)))
+            .options(selectinload(User.roles))
+        )
+        result = await db.execute(query)
+        return result.scalar_one_or_none()
