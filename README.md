@@ -71,9 +71,10 @@ Drum-Notation-Backend/
 | Module | Status | Description |
 |--------|--------|-------------|
 | **Users** | ✅ **COMPLETE** | Full CRUD, authentication, JWT tokens |
+| **Roles** | ✅ **COMPLETE** | Role-based access control |
+| **Media** | ✅ **COMPLETE** | File upload, storage, and management |
 | **Audio Processing** | 🟡 Skeleton | ML models for drum detection |
 | **Jobs** | 🟡 Skeleton | Background processing queue |
-| **Media** | 🟡 Skeleton | File upload and storage |
 | **Notation** | 🟡 Skeleton | Musical notation generation |
 | **Vision** | 🟡 Skeleton | Pose detection for drumming |
 
@@ -123,6 +124,50 @@ The users module is fully implemented with:
 - ✅ Email uniqueness enforcement
 - ✅ Async database operations
 
+## 🔐 **Roles Module (Complete)**
+
+Role-based access control system:
+
+### **API Endpoints:**
+- `POST /roles/` - Create new role
+- `GET /roles/` - List all roles
+- `POST /roles/assign` - Assign role to user
+- `DELETE /roles/remove` - Remove role from user
+- `GET /roles/{role_id}/users` - List users with role
+- And more...
+
+### **Features:**
+- ✅ Many-to-many user-role relationships
+- ✅ Role assignment and removal
+- ✅ Complete CRUD operations
+- ✅ Relationship management
+- ✅ Eager loading to prevent async issues
+
+## 🎵 **Media Module (Complete)**
+
+Comprehensive file management system:
+
+### **API Endpoints:**
+- `POST /media/upload` - Upload media files
+- `GET /media/` - List media files with pagination
+- `GET /media/my-files` - Current user's files
+- `GET /media/{id}` - Get media details
+- `PUT /media/{id}` - Update media metadata
+- `DELETE /media/{id}` - Delete media file
+- `GET /media/{id}/download` - Download file
+- `POST /media/{id}/restore` - Restore deleted file
+- `GET /media/stats/my-usage` - User statistics
+
+### **Features:**
+- ✅ Multi-format support (Audio: MP3, WAV, FLAC; Video: MP4, MOV; Images: JPG, PNG)
+- ✅ File validation and size limits
+- ✅ Organized storage with unique naming
+- ✅ User ownership and access control
+- ✅ Soft delete and restore
+- ✅ Storage quota management (1GB per user)
+- ✅ Statistics and usage tracking
+- ✅ Secure download with proper headers
+
 ## 🗃️ **Database Schema**
 
 The database is designed for the complete drum notation system:
@@ -131,18 +176,23 @@ The database is designed for the complete drum notation system:
 -- Users (implemented)
 users (id, email, password_hash, created_at, updated_at, deleted_at)
 
--- Videos (ready for implementation)
-videos (id, user_id, filename, storage_path, duration_seconds, ...)
+-- Roles (implemented)
+roles (id, name, description, created_at, updated_at, deleted_at)
+user_roles (user_id, role_id, assigned_at)
+
+-- Media (implemented)
+media (id, original_filename, stored_filename, file_path, content_type, 
+       media_type, file_size, description, uploaded_by, created_at, updated_at, deleted_at)
 
 -- Audio Processing (ready for implementation)  
-audio_files (id, video_id, sample_rate, channels, ...)
+audio_files (id, media_id, sample_rate, channels, ...)
 drum_events (id, audio_file_id, time_seconds, instrument, velocity, ...)
 
 -- Job Processing (ready for implementation)
-processing_jobs (id, video_id, job_type, status, progress, ...)
+processing_jobs (id, media_id, job_type, status, progress, ...)
 
 -- Notation (ready for implementation)
-notations (id, video_id, tempo, time_signature, notation_json, ...)
+notations (id, media_id, tempo, time_signature, notation_json, ...)
 
 -- AI Enhancement (ready for implementation)
 openai_enrichments (id, notation_id, model, input_json, output_json, ...)
@@ -180,11 +230,11 @@ openai_enrichments (id, notation_id, model, input_json, output_json, ...)
 
 ## 📋 **Next Development Steps**
 
-1. **Media Module** - File upload and storage system
-2. **Audio Processing** - Integrate ML models for drum detection
-3. **Jobs Module** - Background processing with Celery
-4. **Vision Module** - Computer vision for drumstick tracking
-5. **Notation Module** - Generate musical notation from analysis
+1. **Audio Processing** - Integrate ML models for drum detection
+2. **Jobs Module** - Background processing with Celery  
+3. **Vision Module** - Computer vision for drumstick tracking
+4. **Notation Module** - Generate musical notation from analysis
+5. **Integration** - Connect media files to audio processing pipeline
 
 ## 🧪 **Testing**
 
@@ -201,6 +251,30 @@ openai_enrichments (id, notation_id, model, input_json, output_json, ...)
 - Soft delete for data retention
 - Environment-based configuration
 
+## 📁 **File Storage Structure**
+
+```
+uploads/
+├── audio/          # MP3, WAV, FLAC, M4A files
+├── video/          # MP4, MOV, AVI, MKV files
+└── image/          # JPG, PNG, GIF, WebP files
+```
+
+## 🧪 **Testing Media Module**
+
+Run the comprehensive media endpoint tests:
+```bash
+python test_media_endpoints.py
+```
+
+This will test:
+- File upload with validation
+- File listing and pagination
+- Metadata updates
+- File downloads
+- Soft delete and restore
+- Storage statistics
+
 ---
 
-**Project Status**: User management complete ✅ | Ready for ML module development 🚀
+**Project Status**: Core modules complete ✅ | Media system ready ✅ | Ready for ML integration 🚀

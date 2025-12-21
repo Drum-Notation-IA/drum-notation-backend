@@ -16,3 +16,6 @@ class User(BaseModel):
 
     # Relationship to roles (imported from roles module)
     roles = relationship("Role", secondary="user_roles", back_populates="users")
+
+    # Relationship to media files
+    media_files = relationship("Media", back_populates="user")
