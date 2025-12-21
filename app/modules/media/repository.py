@@ -1,41 +1,45 @@
-import os
-import uuid
 from datetime import datetime
 from typing import List, Optional
 from uuid import UUID
 
-from sqlalchemy import and_, select, update
+from sqlalchemy import and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.modules.media.models import Media, MediaType
-from app.modules.media.schemas import MediaCreate, MediaUpdate
+from app.modules.media.models import AudioFile, Video
+from app.modules.media.schemas import VideoCreate, VideoUpdate
 
 
-class MediaRepository:
-    async def get_by_id(self, db: AsyncSession, media_id: UUID) -> Optional[Media]:
-        """Get media by ID (excluding soft deleted)"""
+class VideoRepository:
+    async def get_by_id(self, db: AsyncSession, video_id: UUID) -> Optional[Video]:
+        """Get video by ID (excluding soft deleted)"""
         query = (
-            select(Media)
-            .where(and_(Media.id == media_id, Media.deleted_at.is_(None)))
-            .options(selectinload(Media.user))
+            select(Video)
+            .where(and_(Video.id == video_id, Video.deleted_at.is_(None)))
+            .options(
+                selectinload(Video.user),
+                selectinload(Video.audio_files),
+                selectinload(Video.processing_jobs),
+                selectinload(Video.notations),
+            )
         )
         result = await db.execute(query)
         return result.scalar_one_or_none()
 
-    async def get_by_stored_filename(
-        self, db: AsyncSession, stored_filename: str
-    ) -> Optional[Media]:
-        """Get media by stored filename (excluding soft deleted)"""
+    async def get_by_filename_and_user(
+        self, db: AsyncSession, filename: str, user_id: UUID
+    ) -> Optional[Video]:
+        """Get video by filename and user (excluding soft deleted)"""
         query = (
-            select(Media)
+            select(Video)
             .where(
                 and_(
-                    Media.stored_filename == stored_filename,
-                    Media.deleted_at.is_(None),
+                    Video.filename == filename,
+                    Video.user_id == user_id,
+                    Video.deleted_at.is_(None),
                 )
             )
-            .options(selectinload(Media.user))
+            .options(selectinload(Video.user))
         )
         result = await db.execute(query)
         return result.scalar_one_or_none()
@@ -46,94 +50,88 @@ class MediaRepository:
         skip: int = 0,
         limit: int = 100,
         user_id: Optional[UUID] = None,
-        media_type: Optional[MediaType] = None,
         include_deleted: bool = False,
-    ) -> List[Media]:
-        """Get all media files with pagination and filtering"""
-        query = select(Media).options(selectinload(Media.user))
+    ) -> List[Video]:
+        """Get all videos with pagination and filtering"""
+        query = select(Video).options(
+            selectinload(Video.user),
+            selectinload(Video.audio_files),
+        )
 
         # Apply filters
         filters = []
         if not include_deleted:
-            filters.append(Media.deleted_at.is_(None))
+            filters.append(Video.deleted_at.is_(None))
         if user_id:
-            filters.append(Media.uploaded_by == user_id)
-        if media_type:
-            filters.append(Media.media_type == media_type)
+            filters.append(Video.user_id == user_id)
 
         if filters:
             query = query.where(and_(*filters))
 
-        query = query.offset(skip).limit(limit).order_by(Media.created_at.desc())
+        query = query.offset(skip).limit(limit).order_by(Video.created_at.desc())
         result = await db.execute(query)
         return list(result.scalars().all())
 
     async def create(
         self,
         db: AsyncSession,
-        media_in: MediaCreate,
-        uploaded_by: UUID,
-        stored_filename: str,
-        file_path: str,
-    ) -> Media:
-        """Create a new media file record"""
-        media = Media(
-            original_filename=media_in.original_filename,
-            stored_filename=stored_filename,
-            file_path=file_path,
-            content_type=media_in.content_type,
-            media_type=media_in.media_type.value,
-            file_size=media_in.file_size,
-            description=media_in.description,
-            uploaded_by=uploaded_by,
+        video_in: VideoCreate,
+        user_id: UUID,
+        storage_path: str,
+        duration_seconds: Optional[float] = None,
+    ) -> Video:
+        """Create a new video record"""
+        video = Video(
+            user_id=user_id,
+            filename=video_in.filename,
+            storage_path=storage_path,
+            duration_seconds=duration_seconds,
         )
-        db.add(media)
+        db.add(video)
         await db.flush()
-        await db.refresh(media)
-        return media
+        await db.refresh(video)
+        return video
 
     async def update(
-        self, db: AsyncSession, media_id: UUID, media_update: MediaUpdate
-    ) -> Optional[Media]:
-        """Update media metadata by ID"""
+        self, db: AsyncSession, video_id: UUID, video_update: VideoUpdate
+    ) -> Optional[Video]:
+        """Update video metadata by ID"""
         # Build update data
         update_data = {}
-        if media_update.original_filename is not None:
-            update_data["original_filename"] = media_update.original_filename
-        if media_update.description is not None:
-            update_data["description"] = media_update.description
+        if video_update.filename is not None:
+            update_data["filename"] = video_update.filename
 
         if not update_data:
-            # No updates to make, return current media
-            return await self.get_by_id(db, media_id)
+            # No updates to make, return current video
+            return await self.get_by_id(db, video_id)
 
         update_data["updated_at"] = datetime.utcnow()
 
         query = (
-            update(Media)
-            .where(and_(Media.id == media_id, Media.deleted_at.is_(None)))
+            update(Video)
+            .where(and_(Video.id == video_id, Video.deleted_at.is_(None)))
             .values(**update_data)
-            .returning(Media)
+            .returning(Video)
         )
 
         result = await db.execute(query)
-        updated_media = result.scalar_one_or_none()
+        updated_video = result.scalar_one_or_none()
 
-        if updated_media:
-            # Reload the media with relationships
-            return await self.get_by_id(db, media_id)
-        return updated_media
+        if updated_video:
+            # Reload the video with relationships
+            return await self.get_by_id(db, video_id)
+        return updated_video
 
-    async def soft_delete(self, db: AsyncSession, media_id: UUID) -> bool:
-        """Soft delete media by setting deleted_at timestamp"""
-        # First check if media exists
-        media = await self.get_by_id(db, media_id)
-        if not media:
+    async def soft_delete(self, db: AsyncSession, video_id: UUID) -> bool:
+        """Soft delete video by setting deleted_at timestamp"""
+        # First check if video exists
+        video = await self.get_by_id(db, video_id)
+        if not video:
             return False
 
         query = (
-            update(Media)
-            .where(and_(Media.id == media_id, Media.deleted_at.is_(None)))
+            update(Video)
+            .where(and_(Video.id == video_id, Video.deleted_at.is_(None)))
             .values(deleted_at=datetime.utcnow())
         )
 
@@ -141,55 +139,52 @@ class MediaRepository:
         await db.flush()
         return True
 
-    async def hard_delete(self, db: AsyncSession, media_id: UUID) -> bool:
-        """Permanently delete media (use with caution)"""
-        media = await self.get_by_id(db, media_id)
-        if media:
-            await db.delete(media)
+    async def hard_delete(self, db: AsyncSession, video_id: UUID) -> bool:
+        """Permanently delete video (use with caution)"""
+        video = await self.get_by_id(db, video_id)
+        if video:
+            await db.delete(video)
             return True
         return False
 
-    async def restore(self, db: AsyncSession, media_id: UUID) -> Optional[Media]:
-        """Restore a soft-deleted media file"""
+    async def restore(self, db: AsyncSession, video_id: UUID) -> Optional[Video]:
+        """Restore a soft-deleted video"""
         query = (
-            update(Media)
-            .where(and_(Media.id == media_id, Media.deleted_at.is_not(None)))
+            update(Video)
+            .where(and_(Video.id == video_id, Video.deleted_at.is_not(None)))
             .values(deleted_at=None, updated_at=datetime.utcnow())
-            .returning(Media)
+            .returning(Video)
         )
 
         result = await db.execute(query)
-        restored_media = result.scalar_one_or_none()
+        restored_video = result.scalar_one_or_none()
 
-        if restored_media:
-            # Reload the media with relationships
-            return await self.get_by_id(db, media_id)
-        return restored_media
+        if restored_video:
+            # Reload the video with relationships
+            return await self.get_by_id(db, video_id)
+        return restored_video
 
     async def count(
         self,
         db: AsyncSession,
         user_id: Optional[UUID] = None,
-        media_type: Optional[MediaType] = None,
         include_deleted: bool = False,
     ) -> int:
-        """Count total media files with filters"""
-        query = select(Media.id)
+        """Count total videos with filters"""
+        query = select(func.count(Video.id))
 
         # Apply filters
         filters = []
         if not include_deleted:
-            filters.append(Media.deleted_at.is_(None))
+            filters.append(Video.deleted_at.is_(None))
         if user_id:
-            filters.append(Media.uploaded_by == user_id)
-        if media_type:
-            filters.append(Media.media_type == media_type)
+            filters.append(Video.user_id == user_id)
 
         if filters:
             query = query.where(and_(*filters))
 
         result = await db.execute(query)
-        return len(result.scalars().all())
+        return result.scalar() or 0
 
     async def get_by_user(
         self,
@@ -197,26 +192,148 @@ class MediaRepository:
         user_id: UUID,
         skip: int = 0,
         limit: int = 100,
-        media_type: Optional[MediaType] = None,
-    ) -> List[Media]:
-        """Get all media files for a specific user"""
-        return await self.get_all(
-            db, skip=skip, limit=limit, user_id=user_id, media_type=media_type
+    ) -> List[Video]:
+        """Get all videos for a specific user"""
+        return await self.get_all(db, skip=skip, limit=limit, user_id=user_id)
+
+    async def filename_exists_for_user(
+        self,
+        db: AsyncSession,
+        filename: str,
+        user_id: UUID,
+        exclude_video_id: Optional[UUID] = None,
+    ) -> bool:
+        """Check if filename already exists for a user (excluding soft deleted)"""
+        query = select(Video.id).where(
+            and_(
+                Video.filename == filename,
+                Video.user_id == user_id,
+                Video.deleted_at.is_(None),
+            )
         )
 
-    async def stored_filename_exists(
-        self, db: AsyncSession, stored_filename: str
-    ) -> bool:
-        """Check if stored filename already exists"""
-        query = select(Media.id).where(Media.stored_filename == stored_filename)
+        if exclude_video_id:
+            query = query.where(Video.id != exclude_video_id)
+
         result = await db.execute(query)
         return result.scalar_one_or_none() is not None
 
-    async def get_user_media_size(self, db: AsyncSession, user_id: UUID) -> int:
-        """Get total file size for a user's media files"""
-        query = select(Media.file_size).where(
-            and_(Media.uploaded_by == user_id, Media.deleted_at.is_(None))
+    async def get_user_storage_size(self, db: AsyncSession, user_id: UUID) -> int:
+        """Get total storage size for a user's videos (in bytes, estimated)"""
+        # Note: This is an estimation based on duration
+        # In a real implementation, you'd track actual file sizes
+        query = select(func.sum(Video.duration_seconds)).where(
+            and_(Video.user_id == user_id, Video.deleted_at.is_(None))
         )
         result = await db.execute(query)
-        sizes = result.scalars().all()
-        return sum(sizes) if sizes else 0
+        total_duration = result.scalar() or 0
+
+        # Estimate: ~1MB per second of video (very rough approximation)
+        estimated_bytes = int(total_duration * 1024 * 1024) if total_duration else 0
+        return estimated_bytes
+
+    async def get_user_total_duration(self, db: AsyncSession, user_id: UUID) -> float:
+        """Get total duration of all videos for a user"""
+        query = select(func.sum(Video.duration_seconds)).where(
+            and_(Video.user_id == user_id, Video.deleted_at.is_(None))
+        )
+        result = await db.execute(query)
+        return result.scalar() or 0.0
+
+    async def get_videos_with_audio(self, db: AsyncSession, user_id: UUID) -> int:
+        """Count videos that have associated audio files"""
+        query = (
+            select(func.count(Video.id.distinct()))
+            .join(AudioFile, Video.id == AudioFile.video_id)
+            .where(
+                and_(
+                    Video.user_id == user_id,
+                    Video.deleted_at.is_(None),
+                    AudioFile.deleted_at.is_(None),
+                )
+            )
+        )
+        result = await db.execute(query)
+        return result.scalar() or 0
+
+    async def get_videos_with_notation(self, db: AsyncSession, user_id: UUID) -> int:
+        """Count videos that have associated notations"""
+        # Import here to avoid circular imports
+        from app.modules.notation.models import Notation
+
+        query = (
+            select(func.count(Video.id.distinct()))
+            .join(Notation, Video.id == Notation.video_id)
+            .where(
+                and_(
+                    Video.user_id == user_id,
+                    Video.deleted_at.is_(None),
+                    Notation.deleted_at.is_(None),
+                )
+            )
+        )
+        result = await db.execute(query)
+        return result.scalar() or 0
+
+
+class AudioFileRepository:
+    async def get_by_id(
+        self, db: AsyncSession, audio_file_id: UUID
+    ) -> Optional[AudioFile]:
+        """Get audio file by ID (excluding soft deleted)"""
+        query = (
+            select(AudioFile)
+            .where(and_(AudioFile.id == audio_file_id, AudioFile.deleted_at.is_(None)))
+            .options(
+                selectinload(AudioFile.video),
+                selectinload(AudioFile.drum_events),
+            )
+        )
+        result = await db.execute(query)
+        return result.scalar_one_or_none()
+
+    async def get_by_video_id(
+        self, db: AsyncSession, video_id: UUID
+    ) -> List[AudioFile]:
+        """Get all audio files for a video"""
+        query = (
+            select(AudioFile)
+            .where(and_(AudioFile.video_id == video_id, AudioFile.deleted_at.is_(None)))
+            .options(selectinload(AudioFile.video))
+        )
+        result = await db.execute(query)
+        return list(result.scalars().all())
+
+    async def create(
+        self,
+        db: AsyncSession,
+        video_id: UUID,
+        sample_rate: int,
+        channels: int,
+        storage_path: str,
+        duration_seconds: Optional[float] = None,
+    ) -> AudioFile:
+        """Create a new audio file record"""
+        audio_file = AudioFile(
+            video_id=video_id,
+            sample_rate=sample_rate,
+            channels=channels,
+            duration_seconds=duration_seconds,
+            storage_path=storage_path,
+        )
+        db.add(audio_file)
+        await db.flush()
+        await db.refresh(audio_file)
+        return audio_file
+
+    async def soft_delete(self, db: AsyncSession, audio_file_id: UUID) -> bool:
+        """Soft delete audio file by setting deleted_at timestamp"""
+        query = (
+            update(AudioFile)
+            .where(and_(AudioFile.id == audio_file_id, AudioFile.deleted_at.is_(None)))
+            .values(deleted_at=datetime.utcnow())
+        )
+
+        result = await db.execute(query)
+        await db.flush()
+        return result.rowcount > 0

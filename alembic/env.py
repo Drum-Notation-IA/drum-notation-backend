@@ -5,9 +5,13 @@ from sqlalchemy import engine_from_config, pool
 from alembic import context
 from app.core.config import settings
 from app.db.base import Base
-from app.modules.media.models import Media  # IMPORTANT: import media models
-from app.modules.roles.models import Role, UserRole  # IMPORTANT: import roles models
-from app.modules.users.models import User  # IMPORTANT: import models
+
+# IMPORTANT: Import all models to ensure they are registered with SQLAlchemy
+from app.modules.jobs.models import ProcessingJob
+from app.modules.media.models import AudioFile, Video
+from app.modules.notation.models import DrumEvent, Notation
+from app.modules.roles.models import Role, UserRole
+from app.modules.users.models import User
 
 config = context.config
 

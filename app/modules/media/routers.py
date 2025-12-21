@@ -16,202 +16,198 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_user
-from app.modules.media.models import MediaType
 from app.modules.media.schemas import (
-    MediaListResponse,
-    MediaRead,
-    MediaUpdate,
-    MediaUploadResponse,
+    VideoListResponse,
+    VideoRead,
+    VideoStatsResponse,
+    VideoUpdate,
+    VideoUploadResponse,
 )
-from app.modules.media.service import MediaService
+from app.modules.media.service import VideoService
 from app.modules.users.models import User
 
-router = APIRouter(prefix="/media", tags=["media"])
-media_service = MediaService()
+router = APIRouter(prefix="/videos", tags=["videos"])
+video_service = VideoService()
 
 
-@router.post("/upload", response_model=MediaUploadResponse, status_code=201)
-async def upload_media_file(
+@router.post("/upload", response_model=VideoUploadResponse, status_code=201)
+async def upload_video_file(
     file: UploadFile = File(...),
-    description: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
-    Upload a new media file (audio, video, or image)
+    Upload a new video file (drum performance recording)
 
-    - **file**: The media file to upload
-    - **description**: Optional description for the file
+    - **file**: The video file to upload (mp4, mov, avi, mkv, webm)
+    - Supported formats: MP4, MOV, AVI, MKV, WebM
+    - Maximum file size: 500MB
     """
-    return await media_service.upload_file(
-        db=db, upload_file=file, user_id=current_user.id, description=description
+    return await video_service.upload_video(
+        db=db, upload_file=file, user_id=current_user.id
     )
 
 
-@router.get("/", response_model=MediaListResponse)
-async def get_media_files(
+@router.get("/", response_model=VideoListResponse)
+async def get_videos(
     page: int = Query(1, ge=1, description="Page number"),
     per_page: int = Query(20, ge=1, le=100, description="Items per page"),
-    media_type: Optional[MediaType] = Query(None, description="Filter by media type"),
     user_id: Optional[UUID] = Query(None, description="Filter by user ID"),
-    owner_only: bool = Query(False, description="Show only current user's files"),
+    owner_only: bool = Query(False, description="Show only current user's videos"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
-    Get a paginated list of media files
+    Get a paginated list of videos
 
     - **page**: Page number (default: 1)
     - **per_page**: Items per page (default: 20, max: 100)
-    - **media_type**: Filter by media type (audio, video, image)
     - **user_id**: Filter by specific user ID
-    - **owner_only**: Show only current user's files
+    - **owner_only**: Show only current user's videos
     """
-    return await media_service.get_media_list(
+    return await video_service.get_video_list(
         db=db,
         page=page,
         per_page=per_page,
         user_id=user_id,
-        media_type=media_type,
         owner_only=owner_only,
         current_user_id=current_user.id,
     )
 
 
-@router.get("/my-files", response_model=MediaListResponse)
-async def get_my_media_files(
+@router.get("/my-videos", response_model=VideoListResponse)
+async def get_my_videos(
     page: int = Query(1, ge=1, description="Page number"),
     per_page: int = Query(20, ge=1, le=100, description="Items per page"),
-    media_type: Optional[MediaType] = Query(None, description="Filter by media type"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
-    Get current user's media files
+    Get current user's videos
 
     - **page**: Page number (default: 1)
     - **per_page**: Items per page (default: 20, max: 100)
-    - **media_type**: Filter by media type (audio, video, image)
     """
-    return await media_service.get_media_list(
+    return await video_service.get_video_list(
         db=db,
         page=page,
         per_page=per_page,
         user_id=current_user.id,
-        media_type=media_type,
         current_user_id=current_user.id,
     )
 
 
-@router.get("/{media_id}", response_model=MediaRead)
-async def get_media_file(
-    media_id: UUID,
+@router.get("/{video_id}", response_model=VideoRead)
+async def get_video(
+    video_id: UUID,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
-    Get media file information by ID
+    Get video information by ID
 
-    - **media_id**: The UUID of the media file
+    - **video_id**: The UUID of the video
     """
-    return await media_service.get_media_by_id(
-        db=db, media_id=media_id, user_id=current_user.id
+    return await video_service.get_video_by_id(
+        db=db, video_id=video_id, user_id=current_user.id
     )
 
 
-@router.put("/{media_id}", response_model=MediaRead)
-async def update_media_file(
-    media_id: UUID,
-    media_update: MediaUpdate,
+@router.put("/{video_id}", response_model=VideoRead)
+async def update_video(
+    video_id: UUID,
+    video_update: VideoUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
-    Update media file metadata
+    Update video metadata
 
-    - **media_id**: The UUID of the media file
-    - **media_update**: Updated media information
+    - **video_id**: The UUID of the video
+    - **video_update**: Updated video information (filename)
     """
-    return await media_service.update_media(
-        db=db, media_id=media_id, media_update=media_update, user_id=current_user.id
+    return await video_service.update_video(
+        db=db, video_id=video_id, video_update=video_update, user_id=current_user.id
     )
 
 
-@router.delete("/{media_id}")
-async def delete_media_file(
-    media_id: UUID,
+@router.delete("/{video_id}")
+async def delete_video(
+    video_id: UUID,
     hard_delete: bool = Query(False, description="Permanently delete file and data"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
-    Delete a media file (soft delete by default)
+    Delete a video (soft delete by default)
 
-    - **media_id**: The UUID of the media file
+    - **video_id**: The UUID of the video
     - **hard_delete**: If True, permanently delete file and data (default: False)
     """
-    return await media_service.delete_media(
-        db=db, media_id=media_id, user_id=current_user.id, hard_delete=hard_delete
+    return await video_service.delete_video(
+        db=db, video_id=video_id, user_id=current_user.id, hard_delete=hard_delete
     )
 
 
-@router.post("/{media_id}/restore", response_model=MediaRead)
-async def restore_media_file(
-    media_id: UUID,
+@router.post("/{video_id}/restore", response_model=VideoRead)
+async def restore_video(
+    video_id: UUID,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
-    Restore a soft-deleted media file
+    Restore a soft-deleted video
 
-    - **media_id**: The UUID of the media file to restore
+    - **video_id**: The UUID of the video to restore
     """
-    return await media_service.restore_media(
-        db=db, media_id=media_id, user_id=current_user.id
+    return await video_service.restore_video(
+        db=db, video_id=video_id, user_id=current_user.id
     )
 
 
-@router.get("/{media_id}/download")
-async def download_media_file(
-    media_id: UUID,
+@router.get("/{video_id}/download")
+async def download_video(
+    video_id: UUID,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
-    Download the actual media file
+    Download the actual video file
 
-    - **media_id**: The UUID of the media file
+    - **video_id**: The UUID of the video
     """
-    file_path, original_filename, content_type = await media_service.get_download_info(
-        db=db, media_id=media_id, user_id=current_user.id
+    storage_path, filename, content_type = await video_service.get_download_info(
+        db=db, video_id=video_id, user_id=current_user.id
     )
 
     # Check if file exists
-    if not os.path.exists(file_path):
+    if not os.path.exists(storage_path):
         raise HTTPException(status_code=404, detail="Physical file not found")
 
     return FileResponse(
-        path=file_path,
-        filename=original_filename,
+        path=storage_path,
+        filename=filename,
         media_type=content_type,
     )
 
 
-@router.get("/stats/my-usage")
-async def get_my_media_stats(
+@router.get("/stats/my-usage", response_model=VideoStatsResponse)
+async def get_my_video_stats(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
-    Get current user's media usage statistics
+    Get current user's video usage statistics
 
     Returns information about:
-    - Total number of files
+    - Total number of videos
     - Total storage used
-    - Files by media type
+    - Total video duration
+    - Videos with extracted audio
+    - Videos with generated notation
     - Storage quota information
     """
-    return await media_service.get_user_media_stats(db=db, user_id=current_user.id)
+    return await video_service.get_user_video_stats(db=db, user_id=current_user.id)
 
 
 @router.get("/stats/storage")
@@ -219,15 +215,69 @@ async def get_storage_stats(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Get storage system statistics (for admin users)
+    Get storage system statistics
 
     Returns information about:
-    - Total storage usage by media type
-    - File counts
+    - Total storage usage for videos and audio
+    - File counts by type
     - Directory information
     """
-    # Note: In a real application, you might want to add admin role checking here
-    return media_service.get_storage_stats()
+    return video_service.get_storage_stats()
+
+
+@router.get("/info/supported-formats")
+async def get_supported_formats():
+    """
+    Get information about supported video formats
+
+    Returns details about:
+    - Supported file extensions
+    - MIME types
+    - File size limits
+    - Format descriptions
+    """
+    return video_service.get_supported_formats()
+
+
+# Video Processing Endpoints
+@router.post("/{video_id}/extract-audio")
+async def extract_audio_from_video(
+    video_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Initiate audio extraction from video
+
+    This will create a background job to extract audio from the video file.
+    The extracted audio will be used for drum detection and notation generation.
+
+    - **video_id**: The UUID of the video to process
+    """
+    return await video_service.initiate_audio_extraction(
+        db=db, video_id=video_id, user_id=current_user.id
+    )
+
+
+@router.get("/{video_id}/processing-status")
+async def get_video_processing_status(
+    video_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Get processing status for a video
+
+    Returns information about:
+    - Whether audio has been extracted
+    - Processing job status
+    - Available processed files
+
+    - **video_id**: The UUID of the video
+    """
+    return await video_service.get_video_processing_status(
+        db=db, video_id=video_id, user_id=current_user.id
+    )
 
 
 # Admin endpoints (you might want to add role-based access control)
@@ -245,45 +295,118 @@ async def cleanup_orphaned_files(
     **Note**: This should be restricted to admin users in production.
     """
     # Note: Add admin role check here in production
-    return await media_service.cleanup_orphaned_files(db=db)
+    return await video_service.cleanup_orphaned_files(db=db)
 
 
 # Public endpoints (no authentication required)
-@router.get("/public/{media_id}")
-async def get_public_media_info(
-    media_id: UUID,
+@router.get("/public/{video_id}")
+async def get_public_video_info(
+    video_id: UUID,
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Get public media file information (no authentication required)
+    Get public video information (no authentication required)
 
-    This endpoint can be used for public file sharing.
+    This endpoint can be used for public video sharing.
     You might want to add additional checks or permissions here.
     """
-    return await media_service.get_media_by_id(db=db, media_id=media_id)
+    return await video_service.get_video_by_id(db=db, video_id=video_id)
 
 
-@router.get("/public/{media_id}/download")
-async def download_public_media_file(
-    media_id: UUID,
+@router.get("/public/{video_id}/download")
+async def download_public_video(
+    video_id: UUID,
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Download public media file (no authentication required)
+    Download public video file (no authentication required)
 
-    This endpoint can be used for public file sharing.
+    This endpoint can be used for public video sharing.
     You might want to add additional checks or permissions here.
     """
-    file_path, original_filename, content_type = await media_service.get_download_info(
-        db=db, media_id=media_id
+    storage_path, filename, content_type = await video_service.get_download_info(
+        db=db, video_id=video_id
     )
 
     # Check if file exists
-    if not os.path.exists(file_path):
+    if not os.path.exists(storage_path):
         raise HTTPException(status_code=404, detail="Physical file not found")
 
     return FileResponse(
-        path=file_path,
-        filename=original_filename,
+        path=storage_path,
+        filename=filename,
         media_type=content_type,
     )
+
+
+# Bulk Operations
+@router.get("/bulk/my-videos/stats")
+async def get_bulk_video_stats(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Get bulk statistics for all user's videos
+
+    Useful for dashboard displays and overview information.
+    """
+    stats = await video_service.get_user_video_stats(db=db, user_id=current_user.id)
+    storage_info = video_service.get_storage_stats()
+    formats_info = video_service.get_supported_formats()
+
+    return {
+        "user_stats": stats,
+        "system_storage": storage_info,
+        "supported_formats": formats_info,
+    }
+
+
+@router.post("/bulk/delete")
+async def bulk_delete_videos(
+    video_ids: List[UUID],
+    hard_delete: bool = Query(False, description="Permanently delete files and data"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Delete multiple videos at once
+
+    - **video_ids**: List of video UUIDs to delete
+    - **hard_delete**: If True, permanently delete files and data (default: False)
+    """
+    if len(video_ids) > 50:
+        raise HTTPException(
+            status_code=400, detail="Cannot delete more than 50 videos at once"
+        )
+
+    results = []
+    for video_id in video_ids:
+        try:
+            result = await video_service.delete_video(
+                db=db,
+                video_id=video_id,
+                user_id=current_user.id,
+                hard_delete=hard_delete,
+            )
+            results.append(
+                {
+                    "video_id": str(video_id),
+                    "status": "success",
+                    "message": result["message"],
+                }
+            )
+        except HTTPException as e:
+            results.append(
+                {"video_id": str(video_id), "status": "error", "message": e.detail}
+            )
+        except Exception as e:
+            results.append(
+                {"video_id": str(video_id), "status": "error", "message": str(e)}
+            )
+
+    successful_deletions = len([r for r in results if r["status"] == "success"])
+
+    return {
+        "message": f"Bulk deletion completed: {successful_deletions}/{len(video_ids)} videos processed",
+        "results": results,
+    }

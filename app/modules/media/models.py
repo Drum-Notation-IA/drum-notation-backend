@@ -1,36 +1,56 @@
 import uuid
-from enum import Enum
 
-from sqlalchemy import Column, ForeignKey, Integer, String, Text
+from sqlalchemy import Column, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
 from app.shared.base_model import BaseModel
 
 
-class MediaType(str, Enum):
-    """Supported media types"""
-
-    AUDIO = "audio"
-    VIDEO = "video"
-    IMAGE = "image"
-
-
-class Media(BaseModel):
-    __tablename__ = "media"
+class Video(BaseModel):
+    __tablename__ = "videos"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    original_filename = Column(String(255), nullable=False)
-    stored_filename = Column(String(255), nullable=False, unique=True)
-    file_path = Column(Text, nullable=False)
-    content_type = Column(String(100), nullable=False)
-    media_type = Column(String(20), nullable=False)  # audio, video, image
-    file_size = Column(Integer, nullable=False)  # Size in bytes
-    description = Column(Text, nullable=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
 
-    # User relationship
-    uploaded_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    user = relationship("User", back_populates="media_files")
+    filename = Column(Text, nullable=False)
+    storage_path = Column(Text, nullable=False)
+    duration_seconds = Column(Float, nullable=True)
+
+    # Relationships
+    user = relationship("User", back_populates="videos")
+    audio_files = relationship(
+        "AudioFile", back_populates="video", cascade="all, delete-orphan"
+    )
+    processing_jobs = relationship(
+        "ProcessingJob", back_populates="video", cascade="all, delete-orphan"
+    )
+    notations = relationship(
+        "Notation", back_populates="video", cascade="all, delete-orphan"
+    )
 
     def __repr__(self):
-        return f"<Media(id={self.id}, filename={self.original_filename}, type={self.media_type})>"
+        return (
+            f"<Video(id={self.id}, filename={self.filename}, user_id={self.user_id})>"
+        )
+
+
+class AudioFile(BaseModel):
+    __tablename__ = "audio_files"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    video_id = Column(UUID(as_uuid=True), ForeignKey("videos.id"), nullable=False)
+
+    sample_rate = Column(Integer, nullable=False)
+    channels = Column(Integer, nullable=False)
+    duration_seconds = Column(Float, nullable=True)
+    storage_path = Column(Text, nullable=False)
+
+    # Relationships
+    video = relationship("Video", back_populates="audio_files")
+    drum_events = relationship(
+        "DrumEvent", back_populates="audio_file", cascade="all, delete-orphan"
+    )
+
+    def __repr__(self):
+        return f"<AudioFile(id={self.id}, video_id={self.video_id}, sample_rate={self.sample_rate})>"

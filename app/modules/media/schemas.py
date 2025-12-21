@@ -1,50 +1,62 @@
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.modules.media.models import MediaType
+
+class VideoBase(BaseModel):
+    filename: str = Field(..., max_length=255)
 
 
-class MediaBase(BaseModel):
-    original_filename: str = Field(..., max_length=255)
-    description: Optional[str] = Field(None, max_length=1000)
+class VideoCreate(VideoBase):
+    pass
 
-
-class MediaCreate(MediaBase):
-    content_type: str = Field(..., max_length=100)
-    media_type: MediaType
-    file_size: int = Field(..., gt=0)
-
-    @field_validator("file_size")
+    @field_validator("filename")
     @classmethod
-    def validate_file_size(cls, v):
-        # Max file size: 100MB for videos, 50MB for audio, 10MB for images
-        max_sizes = {
-            MediaType.VIDEO: 100 * 1024 * 1024,  # 100MB
-            MediaType.AUDIO: 50 * 1024 * 1024,  # 50MB
-            MediaType.IMAGE: 10 * 1024 * 1024,  # 10MB
-        }
-        # We'll validate against the maximum possible size here
-        if v > max(max_sizes.values()):
-            raise ValueError("File size exceeds maximum allowed size")
+    def validate_filename(cls, v):
+        if not v or len(v.strip()) == 0:
+            raise ValueError("Filename cannot be empty")
+
+        # Check for dangerous characters
+        dangerous_chars = ["..", "/", "\\", "<", ">", ":", '"', "|", "?", "*"]
+        for char in dangerous_chars:
+            if char in v:
+                raise ValueError(f"Filename contains invalid character: {char}")
+
+        # Check for allowed video extensions
+        allowed_extensions = [".mp4", ".mov", ".avi", ".mkv", ".webm"]
+        if not any(v.lower().endswith(ext) for ext in allowed_extensions):
+            raise ValueError("Only video files are allowed (mp4, mov, avi, mkv, webm)")
+
+        return v.strip()
+
+
+class VideoUpdate(BaseModel):
+    filename: Optional[str] = Field(None, max_length=255)
+
+    @field_validator("filename")
+    @classmethod
+    def validate_filename(cls, v):
+        if v is not None:
+            if not v or len(v.strip()) == 0:
+                raise ValueError("Filename cannot be empty")
+
+            # Check for dangerous characters
+            dangerous_chars = ["..", "/", "\\", "<", ">", ":", '"', "|", "?", "*"]
+            for char in dangerous_chars:
+                if char in v:
+                    raise ValueError(f"Filename contains invalid character: {char}")
+
+            return v.strip()
         return v
 
 
-class MediaUpdate(BaseModel):
-    original_filename: Optional[str] = Field(None, max_length=255)
-    description: Optional[str] = Field(None, max_length=1000)
-
-
-class MediaRead(MediaBase):
+class VideoRead(VideoBase):
     id: UUID
-    stored_filename: str
-    file_path: str
-    content_type: str
-    media_type: MediaType
-    file_size: int
-    uploaded_by: UUID
+    user_id: UUID
+    storage_path: str
+    duration_seconds: Optional[float]
     created_at: datetime
     updated_at: datetime
 
@@ -52,28 +64,107 @@ class MediaRead(MediaBase):
         from_attributes = True
 
 
-class MediaReadWithUser(MediaRead):
+class VideoReadWithDetails(VideoRead):
     user: "UserRead"
+    audio_files: List["AudioFileRead"] = []
+    processing_jobs: List["ProcessingJobRead"] = []
+    notations: List["NotationRead"] = []
 
     class Config:
         from_attributes = True
 
 
-class MediaUploadResponse(BaseModel):
+class VideoUploadResponse(BaseModel):
     message: str
-    media: MediaRead
+    video: VideoRead
 
 
-class MediaListResponse(BaseModel):
-    media: list[MediaRead]
+class VideoListResponse(BaseModel):
+    videos: List[VideoRead]
     total: int
     page: int
     per_page: int
     pages: int
 
 
+# Audio File Schemas
+class AudioFileBase(BaseModel):
+    sample_rate: int = Field(..., ge=1, le=192000)
+    channels: int = Field(..., ge=1, le=8)
+    duration_seconds: Optional[float] = Field(None, ge=0)
+
+
+class AudioFileCreate(AudioFileBase):
+    video_id: UUID
+    storage_path: str
+
+
+class AudioFileRead(AudioFileBase):
+    id: UUID
+    video_id: UUID
+    storage_path: str
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class AudioFileReadWithDetails(AudioFileRead):
+    video: VideoRead
+    drum_events: List["DrumEventRead"] = []
+
+    class Config:
+        from_attributes = True
+
+
+# Processing Job Schemas (for future use)
+class ProcessingJobRead(BaseModel):
+    id: UUID
+    video_id: UUID
+    job_type: str
+    status: str
+    progress: Optional[float]
+    error_message: Optional[str]
+    created_at: datetime
+    started_at: Optional[datetime]
+    finished_at: Optional[datetime]
+
+    class Config:
+        from_attributes = True
+
+
+# Notation Schemas (for future use)
+class NotationRead(BaseModel):
+    id: UUID
+    video_id: UUID
+    tempo: Optional[int]
+    time_signature: Optional[str]
+    notation_json: dict
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# Drum Event Schemas (for future use)
+class DrumEventRead(BaseModel):
+    id: UUID
+    audio_file_id: UUID
+    time_seconds: float
+    instrument: str
+    velocity: Optional[float]
+    confidence: Optional[float]
+    model_version: Optional[str]
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 # File upload related schemas
-class UploadedFile(BaseModel):
+class UploadedVideoFile(BaseModel):
     filename: str
     content_type: str
     size: int
@@ -92,9 +183,46 @@ class UploadedFile(BaseModel):
 
         return v.strip()
 
+    @field_validator("content_type")
+    @classmethod
+    def validate_content_type(cls, v):
+        allowed_types = [
+            "video/mp4",
+            "video/quicktime",  # mov
+            "video/x-msvideo",  # avi
+            "video/x-matroska",  # mkv
+            "video/webm",
+        ]
+        if v.lower() not in allowed_types:
+            raise ValueError(f"Content type {v} is not allowed for video uploads")
+        return v
+
+    @field_validator("size")
+    @classmethod
+    def validate_size(cls, v):
+        max_size = 500 * 1024 * 1024  # 500MB for video files
+        if v > max_size:
+            raise ValueError("Video file size exceeds maximum allowed size (500MB)")
+        return v
+
+
+# Statistics Schemas
+class VideoStatsResponse(BaseModel):
+    total_videos: int
+    total_size_bytes: int
+    total_size_mb: float
+    total_duration_seconds: Optional[float]
+    total_duration_minutes: Optional[float]
+    videos_with_audio: int
+    videos_with_notation: int
+    storage_quota_bytes: int
+    storage_quota_mb: int
+    storage_used_percentage: float
+
 
 # Import at the end to avoid circular imports
 from app.modules.users.schemas import UserRead
 
 # Update forward references
-MediaReadWithUser.model_rebuild()
+VideoReadWithDetails.model_rebuild()
+AudioFileReadWithDetails.model_rebuild()
