@@ -6,7 +6,6 @@ from fastapi import (
     APIRouter,
     Depends,
     File,
-    Form,
     HTTPException,
     Query,
     UploadFile,
@@ -44,7 +43,7 @@ async def upload_video_file(
     - Maximum file size: 500MB
     """
     return await video_service.upload_video(
-        db=db, upload_file=file, user_id=current_user.id
+        db=db, upload_file=file, user_id=UUID(str(current_user.id))
     )
 
 
@@ -71,7 +70,7 @@ async def get_videos(
         per_page=per_page,
         user_id=user_id,
         owner_only=owner_only,
-        current_user_id=current_user.id,
+        current_user_id=UUID(str(current_user.id)),
     )
 
 
@@ -92,8 +91,8 @@ async def get_my_videos(
         db=db,
         page=page,
         per_page=per_page,
-        user_id=current_user.id,
-        current_user_id=current_user.id,
+        user_id=UUID(str(current_user.id)),
+        current_user_id=UUID(str(current_user.id)),
     )
 
 
@@ -109,7 +108,7 @@ async def get_video(
     - **video_id**: The UUID of the video
     """
     return await video_service.get_video_by_id(
-        db=db, video_id=video_id, user_id=current_user.id
+        db=db, video_id=video_id, user_id=UUID(str(current_user.id))
     )
 
 
@@ -127,7 +126,10 @@ async def update_video(
     - **video_update**: Updated video information (filename)
     """
     return await video_service.update_video(
-        db=db, video_id=video_id, video_update=video_update, user_id=current_user.id
+        db=db,
+        video_id=video_id,
+        video_update=video_update,
+        user_id=UUID(str(current_user.id)),
     )
 
 
@@ -145,7 +147,10 @@ async def delete_video(
     - **hard_delete**: If True, permanently delete file and data (default: False)
     """
     return await video_service.delete_video(
-        db=db, video_id=video_id, user_id=current_user.id, hard_delete=hard_delete
+        db=db,
+        video_id=video_id,
+        user_id=UUID(str(current_user.id)),
+        hard_delete=hard_delete,
     )
 
 
@@ -161,7 +166,7 @@ async def restore_video(
     - **video_id**: The UUID of the video to restore
     """
     return await video_service.restore_video(
-        db=db, video_id=video_id, user_id=current_user.id
+        db=db, video_id=video_id, user_id=UUID(str(current_user.id))
     )
 
 
@@ -177,7 +182,7 @@ async def download_video(
     - **video_id**: The UUID of the video
     """
     storage_path, filename, content_type = await video_service.get_download_info(
-        db=db, video_id=video_id, user_id=current_user.id
+        db=db, video_id=video_id, user_id=UUID(str(current_user.id))
     )
 
     # Check if file exists
@@ -207,7 +212,9 @@ async def get_my_video_stats(
     - Videos with generated notation
     - Storage quota information
     """
-    return await video_service.get_user_video_stats(db=db, user_id=current_user.id)
+    return await video_service.get_user_video_stats(
+        db=db, user_id=UUID(str(current_user.id))
+    )
 
 
 @router.get("/stats/storage")
@@ -255,7 +262,7 @@ async def extract_audio_from_video(
     - **video_id**: The UUID of the video to process
     """
     return await video_service.initiate_audio_extraction(
-        db=db, video_id=video_id, user_id=current_user.id
+        db=db, video_id=video_id, user_id=UUID(str(current_user.id))
     )
 
 
@@ -276,7 +283,7 @@ async def get_video_processing_status(
     - **video_id**: The UUID of the video
     """
     return await video_service.get_video_processing_status(
-        db=db, video_id=video_id, user_id=current_user.id
+        db=db, video_id=video_id, user_id=UUID(str(current_user.id))
     )
 
 
@@ -350,7 +357,9 @@ async def get_bulk_video_stats(
 
     Useful for dashboard displays and overview information.
     """
-    stats = await video_service.get_user_video_stats(db=db, user_id=current_user.id)
+    stats = await video_service.get_user_video_stats(
+        db=db, user_id=UUID(str(current_user.id))
+    )
     storage_info = video_service.get_storage_stats()
     formats_info = video_service.get_supported_formats()
 
@@ -385,7 +394,7 @@ async def bulk_delete_videos(
             result = await video_service.delete_video(
                 db=db,
                 video_id=video_id,
-                user_id=current_user.id,
+                user_id=UUID(str(current_user.id)),
                 hard_delete=hard_delete,
             )
             results.append(
