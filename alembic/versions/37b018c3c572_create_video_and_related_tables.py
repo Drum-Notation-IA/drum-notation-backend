@@ -32,6 +32,7 @@ def upgrade() -> None:
         sa.Column("duration_seconds", sa.Float(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=False),
+        sa.Column("deleted_at", sa.DateTime(), nullable=True),
         sa.ForeignKeyConstraint(
             ["user_id"],
             ["users.id"],
@@ -50,6 +51,7 @@ def upgrade() -> None:
         sa.Column("storage_path", sa.Text(), nullable=False),
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=False),
+        sa.Column("deleted_at", sa.DateTime(), nullable=True),
         sa.ForeignKeyConstraint(
             ["video_id"],
             ["videos.id"],
@@ -70,6 +72,7 @@ def upgrade() -> None:
         sa.Column("finished_at", sa.DateTime(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=False),
+        sa.Column("deleted_at", sa.DateTime(), nullable=True),
         sa.ForeignKeyConstraint(
             ["video_id"],
             ["videos.id"],
@@ -91,6 +94,7 @@ def upgrade() -> None:
         sa.Column("confidence_score", sa.Float(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=False),
+        sa.Column("deleted_at", sa.DateTime(), nullable=True),
         sa.ForeignKeyConstraint(
             ["video_id"],
             ["videos.id"],
@@ -112,6 +116,7 @@ def upgrade() -> None:
         sa.Column("duration", sa.Float(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=False),
+        sa.Column("deleted_at", sa.DateTime(), nullable=True),
         sa.ForeignKeyConstraint(
             ["audio_file_id"],
             ["audio_files.id"],

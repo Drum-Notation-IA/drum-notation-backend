@@ -1,5 +1,6 @@
 import math
-from typing import List, Optional, Tuple
+from pathlib import Path
+from typing import Optional, Tuple
 from uuid import UUID
 
 from fastapi import HTTPException, UploadFile
@@ -36,12 +37,11 @@ class VideoService:
             raise HTTPException(status_code=400, detail="No filename provided")
 
         # Validate content type and file extension
-        if not self.storage.is_allowed_video_type(
-            upload_file.content_type, upload_file.filename
-        ):
+        content_type = upload_file.content_type or "application/octet-stream"
+        if not self.storage.is_allowed_video_type(content_type, upload_file.filename):
             raise HTTPException(
                 status_code=400,
-                detail=f"File type {upload_file.content_type} is not allowed. Only video files (mp4, mov, avi, mkv, webm) are supported.",
+                detail=f"File type {content_type} is not allowed. Only video files (mp4, mov, avi, mkv, webm) are supported.",
             )
 
         # Read file to get size for validation
@@ -105,8 +105,12 @@ class VideoService:
             await db.rollback()
 
             # Clean up file if it was saved
-            if "storage_path" in locals():
-                self.storage.delete_video_file(storage_path)
+            try:
+                storage_path_var = locals().get("storage_path")
+                if storage_path_var:
+                    self.storage.delete_video_file(storage_path_var)
+            except Exception:
+                pass  # Ignore cleanup errors
 
             raise HTTPException(
                 status_code=500, detail=f"Failed to upload video: {str(e)}"
@@ -122,7 +126,7 @@ class VideoService:
             raise HTTPException(status_code=404, detail="Video not found")
 
         # Check ownership if user_id is provided
-        if user_id and video.user_id != user_id:
+        if user_id is not None and str(video.user_id) != str(user_id):
             raise HTTPException(
                 status_code=403, detail="Not authorized to access this video"
             )
@@ -179,7 +183,7 @@ class VideoService:
         if not video:
             raise HTTPException(status_code=404, detail="Video not found")
 
-        if video.user_id != user_id:
+        if str(video.user_id) != str(user_id):
             raise HTTPException(
                 status_code=403, detail="Not authorized to update this video"
             )
@@ -215,7 +219,7 @@ class VideoService:
         if not video:
             raise HTTPException(status_code=404, detail="Video not found")
 
-        if video.user_id != user_id:
+        if str(video.user_id) != str(user_id):
             raise HTTPException(
                 status_code=403, detail="Not authorized to delete this video"
             )
@@ -223,12 +227,12 @@ class VideoService:
         try:
             if hard_delete:
                 # Delete physical files
-                self.storage.delete_video_file(video.storage_path)
+                self.storage.delete_video_file(str(video.storage_path))
 
                 # Delete associated audio files if any
                 audio_files = await self.audio_repository.get_by_video_id(db, video_id)
                 for audio_file in audio_files:
-                    self.storage.delete_audio_file(audio_file.storage_path)
+                    self.storage.delete_audio_file(str(audio_file.storage_path))
 
                 # Hard delete from database (cascades to related records)
                 success = await self.video_repository.hard_delete(db, video_id)
@@ -260,17 +264,17 @@ class VideoService:
             raise HTTPException(status_code=404, detail="Video not found")
 
         # Check ownership if user_id is provided
-        if user_id and video.user_id != user_id:
+        if user_id is not None and str(video.user_id) != str(user_id):
             raise HTTPException(
                 status_code=403, detail="Not authorized to download this video"
             )
 
         # Check if physical file exists
-        if not self.storage.file_exists(video.storage_path):
+        if not self.storage.file_exists(str(video.storage_path)):
             raise HTTPException(status_code=404, detail="Physical file not found")
 
         # Determine content type from filename
-        extension = self.storage.get_file_extension(video.filename).lower()
+        extension = self.storage.get_file_extension(str(video.filename)).lower()
         content_type_map = {
             ".mp4": "video/mp4",
             ".mov": "video/quicktime",
@@ -280,7 +284,7 @@ class VideoService:
         }
         content_type = content_type_map.get(extension, "application/octet-stream")
 
-        return video.storage_path, video.filename, content_type
+        return str(video.storage_path), str(video.filename), content_type
 
     async def get_user_video_stats(
         self, db: AsyncSession, user_id: UUID
@@ -339,7 +343,7 @@ class VideoService:
             )
 
         # Check ownership
-        if video.user_id != user_id:
+        if video is not None and str(video.user_id) != str(user_id):
             raise HTTPException(
                 status_code=403, detail="Not authorized to restore this video"
             )
@@ -362,16 +366,16 @@ class VideoService:
         all_videos = await self.video_repository.get_all(
             db, limit=10000, include_deleted=True
         )
-        video_filenames = [Path(video.storage_path).name for video in all_videos]
+        video_filenames = [Path(str(video.storage_path)).name for video in all_videos]
 
-        all_audio_files = await self.audio_repository.get_all_audio_files(
-            db, limit=10000
-        )
-        audio_filenames = (
-            [Path(audio.storage_path).name for audio in all_audio_files]
-            if hasattr(self.audio_repository, "get_all_audio_files")
-            else []
-        )
+        # Get audio files (simplified approach since get_all_audio_files doesn't exist)
+        audio_filenames = []
+        for video in all_videos:
+            audio_files = await self.audio_repository.get_by_video_id(
+                db, UUID(str(video.id))
+            )
+            for audio_file in audio_files:
+                audio_filenames.append(Path(str(audio_file.storage_path)).name)
 
         # Clean up orphaned files
         orphaned_videos = self.storage.cleanup_orphaned_video_files(video_filenames)
@@ -397,7 +401,7 @@ class VideoService:
         if not video:
             raise HTTPException(status_code=404, detail="Video not found")
 
-        if video.user_id != user_id:
+        if str(video.user_id) != str(user_id):
             raise HTTPException(
                 status_code=403, detail="Not authorized to process this video"
             )
@@ -432,7 +436,7 @@ class VideoService:
         if not video:
             raise HTTPException(status_code=404, detail="Video not found")
 
-        if video.user_id != user_id:
+        if str(video.user_id) != str(user_id):
             raise HTTPException(
                 status_code=403, detail="Not authorized to access this video's status"
             )
@@ -442,7 +446,7 @@ class VideoService:
 
         return {
             "video_id": str(video_id),
-            "filename": video.filename,
+            "filename": str(video.filename),
             "has_audio_extracted": len(audio_files) > 0,
             "audio_files_count": len(audio_files),
             "processing_status": "completed" if audio_files else "pending",

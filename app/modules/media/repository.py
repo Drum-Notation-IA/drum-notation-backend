@@ -328,12 +328,17 @@ class AudioFileRepository:
 
     async def soft_delete(self, db: AsyncSession, audio_file_id: UUID) -> bool:
         """Soft delete audio file by setting deleted_at timestamp"""
+        # First check if audio file exists
+        audio_file = await self.get_by_id(db, audio_file_id)
+        if not audio_file:
+            return False
+
         query = (
             update(AudioFile)
             .where(and_(AudioFile.id == audio_file_id, AudioFile.deleted_at.is_(None)))
             .values(deleted_at=datetime.utcnow())
         )
 
-        result = await db.execute(query)
+        await db.execute(query)
         await db.flush()
-        return result.rowcount > 0
+        return True

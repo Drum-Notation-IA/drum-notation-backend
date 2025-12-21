@@ -4,6 +4,9 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
+# Import at the top to avoid circular imports
+from app.modules.users.schemas import UserRead
+
 
 class VideoBase(BaseModel):
     filename: str = Field(..., max_length=255)
@@ -60,8 +63,7 @@ class VideoRead(VideoBase):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 
 class VideoReadWithDetails(VideoRead):
@@ -70,8 +72,7 @@ class VideoReadWithDetails(VideoRead):
     processing_jobs: List["ProcessingJobRead"] = []
     notations: List["NotationRead"] = []
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 
 class VideoUploadResponse(BaseModel):
@@ -106,16 +107,14 @@ class AudioFileRead(AudioFileBase):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 
 class AudioFileReadWithDetails(AudioFileRead):
     video: VideoRead
     drum_events: List["DrumEventRead"] = []
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 
 # Processing Job Schemas (for future use)
@@ -130,8 +129,7 @@ class ProcessingJobRead(BaseModel):
     started_at: Optional[datetime]
     finished_at: Optional[datetime]
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 
 # Notation Schemas (for future use)
@@ -144,8 +142,7 @@ class NotationRead(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 
 # Drum Event Schemas (for future use)
@@ -159,8 +156,7 @@ class DrumEventRead(BaseModel):
     model_version: Optional[str]
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 
 # File upload related schemas
@@ -218,11 +214,3 @@ class VideoStatsResponse(BaseModel):
     storage_quota_bytes: int
     storage_quota_mb: int
     storage_used_percentage: float
-
-
-# Import at the end to avoid circular imports
-from app.modules.users.schemas import UserRead
-
-# Update forward references
-VideoReadWithDetails.model_rebuild()
-AudioFileReadWithDetails.model_rebuild()

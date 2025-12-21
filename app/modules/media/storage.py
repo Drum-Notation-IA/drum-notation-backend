@@ -1,4 +1,3 @@
-import os
 import uuid
 from pathlib import Path
 from typing import Optional, Tuple
@@ -66,6 +65,8 @@ class VideoStorage:
             Tuple of (stored_filename, storage_path, file_size)
         """
         # Generate unique filename
+        if not upload_file.filename:
+            raise ValueError("Upload file must have a filename")
         stored_filename = self.generate_unique_video_filename(upload_file.filename)
 
         # Get storage path
@@ -141,7 +142,9 @@ class VideoStorage:
 
     def get_storage_info(self) -> dict:
         """Get storage information and statistics"""
-        info = {
+        from typing import Any, Dict
+
+        info: Dict[str, Any] = {
             "base_directory": str(self.base_upload_dir),
             "videos_directory": str(self.videos_dir),
             "audio_directory": str(self.audio_dir),
