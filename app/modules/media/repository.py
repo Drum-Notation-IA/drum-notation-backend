@@ -259,16 +259,16 @@ class VideoRepository:
     async def get_videos_with_notation(self, db: AsyncSession, user_id: UUID) -> int:
         """Count videos that have associated notations"""
         # Import here to avoid circular imports
-        from app.modules.notation.models import Notation
+        from app.modules.notation.models import DrumNotation
 
         query = (
             select(func.count(Video.id.distinct()))
-            .join(Notation, Video.id == Notation.video_id)
+            .join(DrumNotation, Video.id == DrumNotation.video_id)
             .where(
                 and_(
                     Video.user_id == user_id,
                     Video.deleted_at.is_(None),
-                    Notation.deleted_at.is_(None),
+                    DrumNotation.deleted_at.is_(None),
                 )
             )
         )
