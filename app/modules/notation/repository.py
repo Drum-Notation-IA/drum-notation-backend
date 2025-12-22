@@ -7,12 +7,12 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from app.shared.repository import BaseRepository
 from sqlalchemy import and_, desc, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.modules.notation.models import DrumNotation, OpenAIEnrichment
+from app.shared.repository import BaseRepository
 
 
 class DrumNotationRepository(BaseRepository[DrumNotation]):
@@ -64,11 +64,7 @@ class DrumNotationRepository(BaseRepository[DrumNotation]):
         """Get notation with OpenAI enrichments loaded"""
         query = (
             select(DrumNotation)
-            .options(
-                selectinload(DrumNotation.openai_enrichments).where(
-                    OpenAIEnrichment.deleted_at.is_(None)
-                )
-            )
+            .options(selectinload(DrumNotation.openai_enrichments))
             .where(
                 and_(
                     DrumNotation.id == notation_id,
@@ -77,7 +73,17 @@ class DrumNotationRepository(BaseRepository[DrumNotation]):
             )
         )
         result = await db.execute(query)
-        return result.scalar_one_or_none()
+        notation = result.scalar_one_or_none()
+
+        # Filter out deleted enrichments in Python since we can't use where() on selectinload
+        if notation and notation.openai_enrichments:
+            notation.openai_enrichments = [
+                enrichment
+                for enrichment in notation.openai_enrichments
+                if enrichment.deleted_at is None
+            ]
+
+        return notation
 
     async def update_notation_json(
         self, db: AsyncSession, notation_id: UUID, notation_json: Dict[str, Any]
@@ -109,7 +115,7 @@ class DrumNotationRepository(BaseRepository[DrumNotation]):
         time_signature: Optional[str] = None,
     ) -> Optional[DrumNotation]:
         """Update tempo and time signature"""
-        update_data = {"updated_at": datetime.utcnow()}
+        update_data: Dict[str, Any] = {"updated_at": datetime.utcnow()}
 
         if tempo is not None:
             update_data["tempo"] = tempo
@@ -136,7 +142,7 @@ class DrumNotationRepository(BaseRepository[DrumNotation]):
     ) -> List[DrumNotation]:
         """Get notations for videos owned by a specific user"""
         # This requires joining with videos table to check user_id
-        from app.modules.video.models import Video
+        from app.modules.media.models import Video
 
         query = (
             select(DrumNotation)
@@ -153,7 +159,7 @@ class DrumNotationRepository(BaseRepository[DrumNotation]):
             .offset(offset)
         )
         result = await db.execute(query)
-        return result.scalars().all()
+        return list(result.scalars().all())
 
     async def get_recent_notations(
         self, db: AsyncSession, limit: int = 10
@@ -166,7 +172,7 @@ class DrumNotationRepository(BaseRepository[DrumNotation]):
             .limit(limit)
         )
         result = await db.execute(query)
-        return result.scalars().all()
+        return list(result.scalars().all())
 
 
 class OpenAIEnrichmentRepository(BaseRepository[OpenAIEnrichment]):
@@ -228,7 +234,7 @@ class OpenAIEnrichmentRepository(BaseRepository[OpenAIEnrichment]):
             .order_by(desc(OpenAIEnrichment.created_at))
         )
         result = await db.execute(query)
-        return result.scalars().all()
+        return list(result.scalars().all())
 
     async def get_recent_enrichments(
         self, db: AsyncSession, limit: int = 10
@@ -241,7 +247,7 @@ class OpenAIEnrichmentRepository(BaseRepository[OpenAIEnrichment]):
             .limit(limit)
         )
         result = await db.execute(query)
-        return result.scalars().all()
+        return list(result.scalars().all())
 
 
 # Helper repositories for data that doesn't have dedicated tables
@@ -367,6 +373,8 @@ class NotationExportRepository:
     @staticmethod
     def get_exports(notation: DrumNotation) -> List[Dict[str, Any]]:
         """Extract exports from notation JSON"""
+        if notation.notation_json is None:
+            return []
         return notation.notation_json.get("exports", [])
 
     @staticmethod
@@ -374,7 +382,8 @@ class NotationExportRepository:
         """Update exports in notation JSON"""
         if notation.notation_json is None:
             notation.notation_json = {}
-        notation.notation_json["exports"] = exports
+        if isinstance(notation.notation_json, dict):
+            notation.notation_json["exports"] = exports
 
     @staticmethod
     def add_export(notation: DrumNotation, export: Dict[str, Any]) -> None:
@@ -401,6 +410,8 @@ class DrumKitMappingRepository:
     @staticmethod
     def get_drum_mapping(notation: DrumNotation) -> Dict[str, Any]:
         """Extract drum kit mapping from notation JSON"""
+        if notation.notation_json is None:
+            return {}
         return notation.notation_json.get("drum_mapping", {})
 
     @staticmethod
@@ -408,7 +419,8 @@ class DrumKitMappingRepository:
         """Update drum kit mapping in notation JSON"""
         if notation.notation_json is None:
             notation.notation_json = {}
-        notation.notation_json["drum_mapping"] = mapping
+        if isinstance(notation.notation_json, dict):
+            notation.notation_json["drum_mapping"] = mapping
 
     @staticmethod
     def get_default_mapping() -> Dict[str, Any]:
