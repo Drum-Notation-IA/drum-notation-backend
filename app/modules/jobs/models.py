@@ -1,8 +1,7 @@
 import uuid
 from datetime import datetime
-from typing import Optional
 
-from sqlalchemy import Column, DateTime, Float, ForeignKey, String, Text
+from sqlalchemy import Column, DateTime, Enum, Float, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -19,8 +18,10 @@ class ProcessingJob(BaseModel):
         String(50), nullable=False
     )  # e.g., 'audio_extraction', 'drum_detection', 'notation_generation'
     status = Column(
-        String(20), nullable=False, default="pending"
-    )  # pending, running, completed, failed
+        Enum("pending", "running", "completed", "failed", name="job_status"),
+        nullable=False,
+        default="pending",
+    )
     progress = Column(Float, nullable=True, default=0.0)  # 0.0 to 100.0
     error_message = Column(Text, nullable=True)
 

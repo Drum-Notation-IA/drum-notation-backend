@@ -25,9 +25,10 @@ class Video(BaseModel):
     processing_jobs = relationship(
         "ProcessingJob", back_populates="video", cascade="all, delete-orphan"
     )
-    notations = relationship(
-        "Notation", back_populates="video", cascade="all, delete-orphan"
-    )
+    # notations = relationship(
+    #     "Notation", back_populates="video", cascade="all, delete-orphan"
+    # )
+    # Note: Notation relationship commented out to avoid import issues
 
     def __repr__(self):
         return (
@@ -48,9 +49,10 @@ class AudioFile(BaseModel):
 
     # Relationships
     video = relationship("Video", back_populates="audio_files")
-    drum_events = relationship(
-        "DrumEvent", back_populates="audio_file", cascade="all, delete-orphan"
-    )
+    # drum_events = relationship(
+    #     "DrumEvent", back_populates="audio_file", cascade="all, delete-orphan"
+    # )
+    # Note: DrumEvent relationship commented out to avoid import issues
 
     def __repr__(self):
         return f"<AudioFile(id={self.id}, video_id={self.video_id}, sample_rate={self.sample_rate})>"

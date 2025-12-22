@@ -3,7 +3,7 @@
 
 from app.modules.jobs.models import ProcessingJob
 from app.modules.media.models import AudioFile, Video
-from app.modules.notation.models import DrumEvent, Notation
+from app.modules.notation.models import DrumEvent, Notation, OpenAIEnrichment
 from app.modules.roles.models import Role, UserRole
 from app.modules.users.models import User
 
@@ -18,4 +18,5 @@ __all__ = [
     "ProcessingJob",
     "Notation",
     "DrumEvent",
+    "OpenAIEnrichment",
 ]

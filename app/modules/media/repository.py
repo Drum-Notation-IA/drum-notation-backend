@@ -20,7 +20,7 @@ class VideoRepository:
                 selectinload(Video.user),
                 selectinload(Video.audio_files),
                 selectinload(Video.processing_jobs),
-                selectinload(Video.notations),
+                # selectinload(Video.notations),  # Commented out - relationship not active
             )
         )
         result = await db.execute(query)
@@ -286,7 +286,7 @@ class AudioFileRepository:
             .where(and_(AudioFile.id == audio_file_id, AudioFile.deleted_at.is_(None)))
             .options(
                 selectinload(AudioFile.video),
-                selectinload(AudioFile.drum_events),
+                # selectinload(AudioFile.drum_events),  # Commented out - relationship not active
             )
         )
         result = await db.execute(query)

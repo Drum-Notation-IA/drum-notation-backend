@@ -70,7 +70,7 @@ class VideoReadWithDetails(VideoRead):
     user: "UserRead"
     audio_files: List["AudioFileRead"] = []
     processing_jobs: List["ProcessingJobRead"] = []
-    notations: List["NotationRead"] = []
+    # notations: List["NotationRead"] = []  # Commented out to avoid import issues
 
     model_config = {"from_attributes": True}
 
@@ -112,7 +112,7 @@ class AudioFileRead(AudioFileBase):
 
 class AudioFileReadWithDetails(AudioFileRead):
     video: VideoRead
-    drum_events: List["DrumEventRead"] = []
+    # drum_events: List["DrumEventRead"] = []  # Commented out to avoid import issues
 
     model_config = {"from_attributes": True}
 
