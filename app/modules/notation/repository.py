@@ -12,14 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.modules.notation.models import DrumNotation, OpenAIEnrichment
-from app.shared.repository import BaseRepository
 
 
-class DrumNotationRepository(BaseRepository[DrumNotation]):
+class DrumNotationRepository:
     """Repository for drum notation operations"""
 
     def __init__(self):
-        super().__init__(DrumNotation)
+        pass
 
     async def create_notation(
         self,
@@ -175,11 +174,11 @@ class DrumNotationRepository(BaseRepository[DrumNotation]):
         return list(result.scalars().all())
 
 
-class OpenAIEnrichmentRepository(BaseRepository[OpenAIEnrichment]):
+class OpenAIEnrichmentRepository:
     """Repository for OpenAI enrichment operations"""
 
     def __init__(self):
-        super().__init__(OpenAIEnrichment)
+        pass
 
     async def create_enrichment(
         self,
