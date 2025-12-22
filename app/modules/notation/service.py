@@ -18,9 +18,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.openai_service import OpenAIService
 from app.modules.notation.models import DrumNotation
 from app.modules.notation.repository import (
+    DrumKitMappingRepository,
     DrumNotationRepository,
     NotationExportRepository,
+    NotationMeasureRepository,
     OpenAIEnrichmentRepository,
+    StrokeEventRepository,
 )
 
 
@@ -31,6 +34,10 @@ class NotationService:
         # Initialize repositories
         self.notation_repo = DrumNotationRepository()
         self.enrichment_repo = OpenAIEnrichmentRepository()
+        self.export_repo = NotationExportRepository()
+        self.measure_repo = NotationMeasureRepository()
+        self.stroke_repo = StrokeEventRepository()
+        self.kit_mapping_repo = DrumKitMappingRepository()
 
         # Initialize AI service
         self.openai_service = OpenAIService()

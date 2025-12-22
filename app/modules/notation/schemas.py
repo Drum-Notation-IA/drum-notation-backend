@@ -5,7 +5,7 @@ Updated to align with simplified JSON-based database schema
 """
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, Field, validator
@@ -132,7 +132,8 @@ class GenerateNotationRequest(BaseModel):
             raise ValueError("Time signature must be in format 'X/Y'")
         try:
             num, den = v.split("/")
-            int(num), int(den)
+            int(num)
+            int(den)
         except ValueError:
             raise ValueError("Invalid time signature format")
         return v
@@ -411,7 +412,7 @@ class BatchNotationRequest(BaseModel):
     """Request for batch notation operations"""
 
     video_ids: List[UUID] = Field(
-        ..., min_items=1, max_items=10, description="Video IDs to process"
+        ..., min_length=1, max_length=10, description="Video IDs to process"
     )
     tempo_bpm: Optional[float] = Field(None, gt=0, description="Default tempo for all")
     time_signature: str = Field(default="4/4", description="Default time signature")
@@ -474,3 +475,30 @@ class SVGExportOptions(BaseModel):
     height: int = Field(default=600, gt=0, description="SVG height in pixels")
     staff_size: int = Field(default=20, gt=0, description="Staff size")
     show_measure_numbers: bool = Field(default=True, description="Show measure numbers")
+
+
+# Missing schemas required by router
+class AIAnalysisResponse(BaseModel):
+    """Response schema for AI analysis"""
+
+    pattern_analysis: Dict[str, Any] = Field(
+        ..., description="Pattern analysis results"
+    )
+    style_classification: Dict[str, Any] = Field(
+        ..., description="Style classification"
+    )
+    practice_instructions: Dict[str, Any] = Field(
+        ..., description="Practice recommendations"
+    )
+    technical_analysis: str = Field(..., description="Technical analysis text")
+    complexity: str = Field(..., description="Complexity level")
+    confidence: float = Field(..., description="Analysis confidence")
+
+
+class DrumKitMappingResponse(BaseModel):
+    """Response schema for drum kit mapping"""
+
+    kit_id: UUID = Field(..., description="Kit mapping ID")
+    kit_name: str = Field(..., description="Drum kit name")
+    mappings: Dict[str, str] = Field(..., description="Instrument mappings")
+    created_at: datetime = Field(..., description="Creation timestamp")

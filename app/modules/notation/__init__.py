@@ -17,13 +17,8 @@ precise timing data for stroke-by-stroke highlighting during audio playback.
 """
 
 from .models import (
-    DrumKitMapping,
     DrumNotation,
-    DrumNote,
-    NotationBeat,
     NotationExport,
-    NotationMeasure,
-    NotationTemplate,
     OpenAIEnrichment,
     StrokeEvent,
 )
@@ -34,7 +29,6 @@ from .repository import (
     NotationBeatRepository,
     NotationExportRepository,
     NotationMeasureRepository,
-    NotationTemplateRepository,
     OpenAIEnrichmentRepository,
     StrokeEventRepository,
 )
@@ -47,20 +41,16 @@ from .schemas import (
     DetailedNotationResponse,
     DrumKitMappingResponse,
     DrumNotationResponse,
-    DrumNoteResponse,
     ExportNotationRequest,
     GenerateNotationRequest,
-    NotationBeatResponse,
     NotationError,
     NotationExportResponse,
     NotationHealthResponse,
     NotationListResponse,
-    NotationMeasureResponse,
     NotationSearchRequest,
     NotationStatsResponse,
     NotationTimelineResponse,
     NotationValidationResponse,
-    StrokeEventResponse,
     UpdateNotationRequest,
 )
 from .service import NotationService
@@ -68,13 +58,8 @@ from .service import NotationService
 __all__ = [
     # Models
     "DrumNotation",
-    "NotationMeasure",
-    "NotationBeat",
-    "DrumNote",
     "StrokeEvent",
-    "DrumKitMapping",
     "NotationExport",
-    "NotationTemplate",
     "OpenAIEnrichment",
     # Repositories
     "DrumNotationRepository",
@@ -84,7 +69,6 @@ __all__ = [
     "StrokeEventRepository",
     "DrumKitMappingRepository",
     "NotationExportRepository",
-    "NotationTemplateRepository",
     "OpenAIEnrichmentRepository",
     # Service
     "NotationService",
@@ -101,10 +85,6 @@ __all__ = [
     "DrumNotationResponse",
     "DetailedNotationResponse",
     "NotationTimelineResponse",
-    "NotationMeasureResponse",
-    "NotationBeatResponse",
-    "DrumNoteResponse",
-    "StrokeEventResponse",
     "NotationExportResponse",
     "AIAnalysisResponse",
     "NotationListResponse",
