@@ -1,8 +1,11 @@
-import asyncio
+"""
+Audio Source Separation Module
+Advanced drum source separation and enhancement for automatic drum transcription
+"""
+
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
-from uuid import UUID
+from typing import Dict, Optional
 
 import numpy as np
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,7 +19,7 @@ try:
     from sklearn.decomposition import NMF, FastICA
 
     AUDIO_LIBS_AVAILABLE = True
-except ImportError:
+except ImportError as e:
     AUDIO_LIBS_AVAILABLE = False
     librosa = None
     sf = None
@@ -24,6 +27,8 @@ except ImportError:
     FastICA = None
     NMF = None
     scipy = None
+    logger = logging.getLogger(__name__)
+    logger.warning(f"Audio processing libraries not available: {e}")
 
 from app.modules.media.models import AudioFile
 from app.modules.media.repository import AudioFileRepository
@@ -34,33 +39,34 @@ logger = logging.getLogger(__name__)
 class SeparationConfig:
     """Configuration for audio source separation"""
 
-    def __init__(self):
-        # STFT parameters
-        self.n_fft = 2048
-        self.hop_length = 512
-        self.window = "hann"
+    def __init__(
+        self,
+        n_fft: int = 2048,
+        hop_length: int = 512,
+        window: str = "hann",
+        n_components: int = 8,
+        max_iterations: int = 200,
+        tolerance: float = 1e-4,
+        mask_smoothing: bool = True,
+        smoothing_sigma: float = 1.0,
+    ):
+        self.n_fft = n_fft
+        self.hop_length = hop_length
+        self.window = window
+        self.n_components = n_components
+        self.max_iterations = max_iterations
+        self.tolerance = tolerance
+        self.mask_smoothing = mask_smoothing
+        self.smoothing_sigma = smoothing_sigma
 
-        # Source separation parameters
-        self.n_components = 8  # Number of sources to separate
-        self.max_iterations = 200
-        self.tolerance = 1e-4
-
-        # Frequency band definitions for drum separation
+        # Frequency ranges for drum types (Hz)
         self.frequency_ranges = {
-            "kick": (20, 150),
-            "snare": (100, 500),
-            "hihat": (5000, 20000),
-            "toms": (80, 800),
+            "kick": (20, 120),
+            "snare": (150, 600),
+            "hihat": (4000, 16000),
             "cymbals": (3000, 20000),
-            "bass": (20, 250),
-            "mid": (250, 4000),
-            "high": (4000, 20000),
+            "toms": (80, 400),
         }
-
-        # Masking parameters
-        self.mask_threshold = 0.1
-        self.mask_smoothing = True
-        self.smoothing_sigma = 1.0
 
 
 class DrumSourceSeparator:
@@ -69,6 +75,9 @@ class DrumSourceSeparator:
     def __init__(self, config: Optional[SeparationConfig] = None):
         self.config = config or SeparationConfig()
         self.audio_repository = AudioFileRepository()
+
+        if not AUDIO_LIBS_AVAILABLE:
+            logger.warning("Audio processing libraries not available")
 
     async def separate_drum_sources(
         self,
@@ -95,17 +104,19 @@ class DrumSourceSeparator:
         try:
             # Load audio data
             audio_path = str(audio_file.storage_path)
+            if librosa is None:
+                raise RuntimeError("librosa not available")
             y, sr = librosa.load(audio_path, sr=None)
 
             logger.info(f"Loaded audio for separation: {len(y)} samples at {sr}Hz")
 
             # Apply source separation based on method
             if method == "nmf":
-                separated_sources = await self._separate_nmf(y, sr)
+                separated_sources = await self._separate_nmf(y, int(sr))
             elif method == "ica":
-                separated_sources = await self._separate_ica(y, sr)
+                separated_sources = await self._separate_ica(y, int(sr))
             elif method == "spectral":
-                separated_sources = await self._separate_spectral_masking(y, sr)
+                separated_sources = await self._separate_spectral_masking(y, int(sr))
             else:
                 raise ValueError(f"Unknown separation method: {method}")
 
@@ -113,7 +124,7 @@ class DrumSourceSeparator:
             separated_paths = {}
             if save_separated:
                 separated_paths = await self._save_separated_sources(
-                    separated_sources, audio_file, sr
+                    separated_sources, audio_file, int(sr)
                 )
 
             logger.info(f"Successfully separated {len(separated_sources)} sources")
@@ -134,6 +145,9 @@ class DrumSourceSeparator:
         Returns:
             Dictionary of separated sources
         """
+        if librosa is None or NMF is None:
+            raise RuntimeError("Required audio libraries not available")
+
         # Compute magnitude spectrogram
         stft = librosa.stft(
             y,
@@ -142,15 +156,12 @@ class DrumSourceSeparator:
             window=self.config.window,
         )
         magnitude = np.abs(stft)
-        phase = np.angle(stft)
 
         # Apply NMF to magnitude spectrogram
         nmf = NMF(
-            n_components=self.config.n_components,
+            n_components=int(self.config.n_components),  # type: ignore
             max_iter=self.config.max_iterations,
             random_state=42,
-            alpha=0.1,
-            l1_ratio=0.5,
         )
 
         # Reshape for NMF (features x samples)
@@ -177,7 +188,6 @@ class DrumSourceSeparator:
             source_audio = librosa.istft(
                 masked_stft,
                 hop_length=self.config.hop_length,
-                window=self.config.window,
             )
 
             # Classify source based on spectral characteristics
@@ -198,6 +208,9 @@ class DrumSourceSeparator:
         Returns:
             Dictionary of separated sources
         """
+        if FastICA is None:
+            raise RuntimeError("FastICA not available")
+
         # ICA works best with stereo input
         if y.ndim == 1:
             # Create pseudo-stereo by time-shifting
@@ -225,7 +238,12 @@ class DrumSourceSeparator:
             window_data = y_stereo[:, start:end]
 
             try:
-                components = ica.fit_transform(window_data.T).T
+                if window_data is not None and hasattr(window_data, "T"):
+                    components = ica.fit_transform(window_data.T)
+                    if components is not None and hasattr(components, "T"):
+                        components = components.T
+                else:
+                    components = ica.fit_transform(window_data)
                 separated_components.append(components)
             except Exception as e:
                 logger.warning(f"ICA failed for window {start}-{end}: {e}")
@@ -268,12 +286,14 @@ class DrumSourceSeparator:
         Returns:
             Dictionary of separated drum sources
         """
+        if librosa is None or scipy is None:
+            raise RuntimeError("Required audio libraries not available")
+
         # Compute STFT
         stft = librosa.stft(
             y, n_fft=self.config.n_fft, hop_length=self.config.hop_length
         )
         magnitude = np.abs(stft)
-        phase = np.angle(stft)
 
         # Create frequency bins
         freqs = librosa.fft_frequencies(sr=sr, n_fft=self.config.n_fft)
@@ -296,7 +316,7 @@ class DrumSourceSeparator:
 
             # Combine masks
             final_mask = temporal_mask
-            if self.config.mask_smoothing:
+            if self.config.mask_smoothing and hasattr(scipy, "ndimage"):
                 final_mask = scipy.ndimage.gaussian_filter(
                     final_mask, sigma=self.config.smoothing_sigma
                 )
@@ -326,6 +346,9 @@ class DrumSourceSeparator:
         Returns:
             Temporal mask array
         """
+        if librosa is None:
+            raise RuntimeError("librosa not available")
+
         # Calculate energy over frequency bands
         energy = np.sum(magnitude, axis=0)
 
@@ -343,48 +366,47 @@ class DrumSourceSeparator:
                 end = min(len(mask), onset + 10)  # Longer decay for kick/snare
                 mask[start:end] = 1.0
 
-        elif drum_type in ["hihat", "cymbals"]:
-            # For sustained elements, use energy-based masking
-            threshold = np.percentile(energy, 60)
-            mask = (energy > threshold).astype(float)
-
         else:
-            # Default: energy-based masking
-            threshold = np.percentile(energy, 50)
+            # For sustained drums (hi-hat, cymbals), use energy-based masking
+            threshold = np.mean(energy) + np.std(energy)
             mask = (energy > threshold).astype(float)
 
-        # Broadcast to full spectrogram shape
-        full_mask = np.broadcast_to(mask[None, :], magnitude.shape)
+        # Smooth the mask
+        if mask.ndim == 1:
+            mask = np.tile(mask, (magnitude.shape[0], 1))
 
-        return full_mask
+        return mask
 
     async def _classify_separated_source(
         self, magnitude: np.ndarray, sr: int, component_idx: int
     ) -> str:
         """
-        Classify separated source based on spectral characteristics
+        Classify separated audio source based on spectral characteristics
 
         Args:
-            magnitude: Magnitude spectrogram of separated source
+            magnitude: Magnitude spectrogram of the source
             sr: Sample rate
-            component_idx: Component index
+            component_idx: Index of the component
 
         Returns:
-            Classified source name
+            Predicted source name
         """
+        if librosa is None:
+            raise RuntimeError("librosa not available")
+
         # Calculate spectral features
         freqs = librosa.fft_frequencies(sr=sr, n_fft=self.config.n_fft)
 
         # Energy distribution across frequency bands
         total_energy = np.sum(magnitude)
         if total_energy == 0:
-            return f"empty_component_{component_idx}"
+            return f"silent_component_{component_idx}"
 
         band_energies = {}
         for drum_type, (low_freq, high_freq) in self.config.frequency_ranges.items():
             freq_mask = (freqs >= low_freq) & (freqs <= high_freq)
-            band_energy = np.sum(magnitude[freq_mask]) / total_energy
-            band_energies[drum_type] = band_energy
+            band_energy = np.sum(magnitude[freq_mask, :])
+            band_energies[drum_type] = band_energy / total_energy
 
         # Find dominant frequency band
         dominant_band = max(band_energies.keys(), key=lambda k: band_energies[k])
@@ -442,6 +464,8 @@ class DrumSourceSeparator:
                     audio_data = audio_data / np.max(np.abs(audio_data)) * 0.95
 
                 # Save audio file
+                if sf is None:
+                    raise RuntimeError("soundfile not available")
                 sf.write(str(filepath), audio_data, sr, subtype="PCM_16")
 
                 saved_paths[source_name] = str(filepath)
@@ -472,19 +496,19 @@ class DrumSourceSeparator:
 
         try:
             # Load audio
+            if librosa is None:
+                raise RuntimeError("librosa not available")
             y, sr = librosa.load(audio_path, sr=None)
 
             # Apply enhancement based on drum type
             if drum_type == "kick":
-                enhanced = await self._enhance_kick_drum(y, sr)
+                enhanced = await self._enhance_kick_drum(y, int(sr))
             elif drum_type == "snare":
-                enhanced = await self._enhance_snare_drum(y, sr)
+                enhanced = await self._enhance_snare_drum(y, int(sr))
             elif drum_type == "hihat":
-                enhanced = await self._enhance_hihat(y, sr)
-            elif drum_type == "all":
-                enhanced = await self._enhance_all_drums(y, sr)
+                enhanced = await self._enhance_hihat(y, int(sr))
             else:
-                enhanced = y  # No enhancement
+                enhanced = await self._enhance_all_drums(y, int(sr))
 
             return enhanced
 
@@ -496,13 +520,22 @@ class DrumSourceSeparator:
         """
         Enhance kick drum frequencies
         """
+        if signal is None:
+            return y
+
         # Apply low-pass filter and boost low frequencies
         nyquist = sr / 2
         low_cutoff = 150 / nyquist
 
-        # Design Butterworth filter
-        b, a = signal.butter(4, low_cutoff, btype="low")
-        kick_enhanced = signal.filtfilt(b, a, y)
+        try:
+            butter_result = signal.butter(4, low_cutoff, btype="low")
+            if butter_result is not None and len(butter_result) == 2:
+                b, a = butter_result
+                kick_enhanced = signal.filtfilt(b, a, y)
+            else:
+                return y
+        except Exception:
+            return y
 
         # Apply compression to even out dynamics
         kick_enhanced = await self._apply_compression(kick_enhanced, ratio=3.0)
@@ -514,19 +547,30 @@ class DrumSourceSeparator:
         """
         Enhance snare drum frequencies
         """
+        if signal is None:
+            return y
+
         # Band-pass filter for snare frequencies
         nyquist = sr / 2
         low_cutoff = 100 / nyquist
         high_cutoff = 600 / nyquist
 
-        b, a = signal.butter(4, [low_cutoff, high_cutoff], btype="band")
-        snare_enhanced = signal.filtfilt(b, a, y)
+        try:
+            butter_result = signal.butter(4, [low_cutoff, high_cutoff], btype="band")
+            if butter_result is not None and len(butter_result) == 2:
+                b, a = butter_result
+                snare_enhanced = signal.filtfilt(b, a, y)
 
-        # Add some high-frequency content for snap
-        b_high, a_high = signal.butter(2, 3000 / nyquist, btype="high")
-        snare_high = signal.filtfilt(b_high, a_high, y) * 0.3
-
-        snare_enhanced += snare_high
+                # Add some high-frequency content for snap
+                butter_high_result = signal.butter(2, 3000 / nyquist, btype="high")
+                if butter_high_result is not None and len(butter_high_result) == 2:
+                    b_high, a_high = butter_high_result
+                    snare_high = signal.filtfilt(b_high, a_high, y) * 0.3
+                    snare_enhanced += snare_high
+            else:
+                return y
+        except Exception:
+            return y
 
         # Mix with original
         return 0.8 * y + 0.2 * snare_enhanced
@@ -535,12 +579,22 @@ class DrumSourceSeparator:
         """
         Enhance hi-hat frequencies
         """
+        if signal is None:
+            return y
+
         # High-pass filter for hi-hat
         nyquist = sr / 2
-        cutoff = 4000 / nyquist
+        high_cutoff = 4000 / nyquist
 
-        b, a = signal.butter(4, cutoff, btype="high")
-        hihat_enhanced = signal.filtfilt(b, a, y)
+        try:
+            butter_result = signal.butter(4, high_cutoff, btype="high")
+            if butter_result is not None and len(butter_result) == 2:
+                b, a = butter_result
+                hihat_enhanced = signal.filtfilt(b, a, y)
+            else:
+                return y
+        except Exception:
+            return y
 
         # Apply light compression
         hihat_enhanced = await self._apply_compression(hihat_enhanced, ratio=2.0)
@@ -622,7 +676,7 @@ class DrumSourceSeparator:
         Returns:
             Audio with harmonic content reduced
         """
-        if not AUDIO_LIBS_AVAILABLE:
+        if not AUDIO_LIBS_AVAILABLE or librosa is None:
             return y
 
         # Separate harmonic and percussive components
@@ -651,7 +705,11 @@ class DrumSourceSeparator:
 
         # Reconstruction error
         if separated_sources:
-            reconstructed = sum(separated_sources.values())
+            reconstructed = np.zeros_like(original)
+            for source in separated_sources.values():
+                if hasattr(source, "__len__") and len(source) > 0:
+                    min_len = min(len(reconstructed), len(source))
+                    reconstructed[:min_len] += source[:min_len]
 
             # Pad/trim to match original length
             min_length = min(len(original), len(reconstructed))
@@ -665,25 +723,20 @@ class DrumSourceSeparator:
 
             if noise_power > 0:
                 sdr = 10 * np.log10(signal_power / noise_power)
-            else:
-                sdr = float("inf")
+                metrics["sdr_db"] = float(sdr)
 
-            metrics["sdr"] = float(sdr)
+            # Reconstruction error
             metrics["reconstruction_error"] = float(np.mean(noise**2))
 
         # Source diversity (how different the sources are)
-        if len(separated_sources) > 1:
+        if hasattr(separated_sources, "__len__") and len(separated_sources) > 1:
             source_arrays = list(separated_sources.values())
             correlations = []
 
-            for i in range(len(source_arrays)):
-                for j in range(i + 1, len(source_arrays)):
-                    s1 = source_arrays[i]
-                    s2 = source_arrays[j]
-
-                    # Align lengths
-                    min_len = min(len(s1), len(s2))
-                    if min_len > 0:
+            for i, s1 in enumerate(source_arrays):
+                for s2 in source_arrays[i + 1 :]:
+                    if len(s1) > 0 and len(s2) > 0:
+                        min_len = min(len(s1), len(s2))
                         corr = np.corrcoef(s1[:min_len], s2[:min_len])[0, 1]
                         if not np.isnan(corr):
                             correlations.append(abs(corr))
@@ -734,6 +787,8 @@ class AudioStemExporter:
             stem_dir.mkdir(parents=True, exist_ok=True)
 
             # Load original audio for reference
+            if librosa is None:
+                raise RuntimeError("librosa not available")
             y, sr = librosa.load(str(audio_file.storage_path), sr=None)
 
             stem_paths = {}
@@ -779,7 +834,9 @@ class AudioStemExporter:
                 else:
                     subtype = "PCM_24"
 
-                sf.write(str(stem_path), stem_audio, sr, subtype=subtype)
+                if sf is None:
+                    raise RuntimeError("soundfile not available")
+                sf.write(str(stem_path), stem_audio, int(sr), subtype=subtype)
                 stem_paths[stem_name] = str(stem_path)
 
             return stem_paths
