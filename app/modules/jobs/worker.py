@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, Optional, cast
 from uuid import UUID
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal  # type: ignore[attr-defined]
@@ -77,7 +77,10 @@ class JobProcessor:
         """Get all pending jobs from the database"""
         query = (
             select(ProcessingJob)
-            .where(text("status = 'pending' AND deleted_at IS NULL"))
+            .where(
+                (ProcessingJob.status == "pending")
+                & (ProcessingJob.deleted_at.is_(None))
+            )
             .order_by(ProcessingJob.created_at)
         )
 
@@ -338,15 +341,26 @@ class JobProcessor:
 
     async def cancel_job(self, db: AsyncSession, job_id: UUID) -> bool:
         """Cancel a pending or running job"""
-        # Use text() to avoid type issues
-
+        # Try to cancel pending job first
         query = (
             update(ProcessingJob)
-            .where(text(f"id = '{job_id}' AND status IN ('pending', 'running')"))
+            .where((ProcessingJob.id == job_id) & (ProcessingJob.status == "pending"))
             .values(status="failed", finished_at=datetime.utcnow())
         )
 
         result = await db.execute(query)
+
+        # If no pending job found, try running job
+        if getattr(result, "rowcount", 0) == 0:
+            query = (
+                update(ProcessingJob)
+                .where(
+                    (ProcessingJob.id == job_id) & (ProcessingJob.status == "running")
+                )
+                .values(status="failed", finished_at=datetime.utcnow())
+            )
+            result = await db.execute(query)
+
         await db.commit()
 
         affected_rows = getattr(result, "rowcount", 0) or 0
@@ -363,22 +377,37 @@ class JobProcessor:
         """Clean up old completed/failed jobs"""
         cutoff_date = datetime.utcnow() - timedelta(days=days_old)
 
-        # Use text() to avoid type issues
-        cutoff_date_str = cutoff_date.isoformat()
+        # Clean up completed jobs
         query = (
             update(ProcessingJob)
             .where(
-                text(
-                    f"status IN ('completed', 'failed') AND deleted_at IS NULL AND finished_at < '{cutoff_date_str}'"
-                )
+                (ProcessingJob.status == "completed")
+                & (ProcessingJob.deleted_at.is_(None))
+                & (ProcessingJob.finished_at < cutoff_date)
             )
             .values(deleted_at=datetime.utcnow())
         )
 
-        result = await db.execute(query)
+        result1 = await db.execute(query)
+
+        # Clean up failed jobs
+        query = (
+            update(ProcessingJob)
+            .where(
+                (ProcessingJob.status == "failed")
+                & (ProcessingJob.deleted_at.is_(None))
+                & (ProcessingJob.finished_at < cutoff_date)
+            )
+            .values(deleted_at=datetime.utcnow())
+        )
+
+        result2 = await db.execute(query)
+
         await db.commit()
 
-        cleaned_count = getattr(result, "rowcount", 0) or 0
+        cleaned_count = (getattr(result1, "rowcount", 0) or 0) + (
+            getattr(result2, "rowcount", 0) or 0
+        )
         logger.info(f"Cleaned up {cleaned_count} old jobs")
 
         return cleaned_count
@@ -389,7 +418,7 @@ class JobProcessor:
         # Get job counts by status
         query = (
             select(ProcessingJob.status, func.count(ProcessingJob.id).label("count"))  # type: ignore[arg-type]
-            .where(text("deleted_at IS NULL"))
+            .where(ProcessingJob.deleted_at.is_(None))
             .group_by(ProcessingJob.status)
         )
 
@@ -399,7 +428,7 @@ class JobProcessor:
         # Get job counts by type
         query = (
             select(ProcessingJob.job_type, func.count(ProcessingJob.id).label("count"))  # type: ignore[arg-type]
-            .where(text("deleted_at IS NULL"))
+            .where(ProcessingJob.deleted_at.is_(None))
             .group_by(ProcessingJob.job_type)
         )
 

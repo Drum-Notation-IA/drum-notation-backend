@@ -207,3 +207,4 @@ dev_tools/
 # Runtime files
 *.pid
 *.lock
+.env.docker
