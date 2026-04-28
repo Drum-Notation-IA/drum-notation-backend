@@ -1,17 +1,26 @@
 from typing import List
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.modules.auth.router import (
+    _client_ip,
+    _enforce_rate_limit,
+    _user_agent,
+    get_auth_service,
+)
+from app.modules.auth.schemas import LoginChallengeResponse
+from app.modules.auth.service import AuthService
+from app.modules.auth.utils import login_rate_limiter
+from app.core.config import settings
 from app.modules.roles.schemas import (
     RoleCreate,
     RoleRead,
     UserRoleRead,
 )
 from app.modules.users.schemas import (
-    Token,
     UserCreate,
     UserLogin,
     UserPasswordUpdate,
@@ -33,13 +42,37 @@ async def register_user(
     return await user_service.create_user(db, user_in)
 
 
-@router.post("/login", response_model=Token)
+@router.post("/login", response_model=LoginChallengeResponse)
 async def login_user(
     login_data: UserLogin,
+    request: Request,
     db: AsyncSession = Depends(get_db),
+    auth_service: AuthService = Depends(get_auth_service),
 ):
-    """Login user and return JWT token"""
-    return await user_service.authenticate_user(db, login_data)
+    """Step 1 of the 2FA login flow.
+
+    Validates credentials and emails an OTP. Returns a short-lived
+    ``challenge_token`` that must be sent to ``POST /auth/verify-otp``
+    together with the OTP to obtain the final JWT.
+
+    Kept under ``/users/login`` for backward compatibility; new clients
+    should call ``POST /auth/login`` directly.
+    """
+    ip = _client_ip(request)
+    rl_key = f"login:{login_data.email.lower()}:{ip or 'unknown'}"
+    await _enforce_rate_limit(
+        login_rate_limiter,
+        rl_key,
+        max_requests=settings.OTP_LOGIN_RATE_LIMIT_PER_HOUR,
+        window_seconds=3600,
+    )
+    return await auth_service.start_login(
+        db,
+        email=str(login_data.email),
+        password=login_data.password,
+        ip_address=ip,
+        user_agent=_user_agent(request),
+    )
 
 
 # Temporarily disabled for testing

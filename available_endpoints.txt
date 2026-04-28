@@ -20,16 +20,60 @@ GET     /datasets                   - Available datasets
 GET     /analytics/performance      - Performance analytics
 GET     /analytics/usage           - Usage analytics
 
-AUTHENTICATION ENDPOINTS
--------------------------
+AUTHENTICATION ENDPOINTS (frontend-compatible aliases)
+-------------------------------------------------------
 POST    /api/auth/login            - User login (simplified for demo)
-POST    /api/auth/register         - User registration (simplified for demo)
+POST    /api/auth/register         - Real registration: creates the user and dispatches an OTP to
+                                     the registered email. Body: { "email": "...", "password": "..." }
+                                     Returns the same LoginChallengeResponse shape as /auth/register,
+                                     so the client can navigate straight to the OTP verification UI.
 GET     /api/auth/me               - Current user information
+
+2FA / OTP AUTHENTICATION (PRIMARY LOGIN FLOW)
+---------------------------------------------
+POST    /auth/register             - Sign-up + email verification in one step.
+                                     Body: { "email": "...", "password": "..." }
+                                     Returns: { "challenge_token", "masked_destination",
+                                                "expires_in", "challenge_expires_in",
+                                                "resend_available_in", "otp_required": true }
+                                     Errors: 409 Conflict if the email is already registered.
+                                     Follow up with POST /auth/verify-otp using the OTP delivered
+                                     to the inbox to finish onboarding and receive the JWT.
+
+POST    /auth/login                - Step 1 (credentials): Validate email+password and email an OTP
+                                     Body: { "email": "...", "password": "..." }
+                                     Returns: { "challenge_token", "masked_destination",
+                                                "expires_in", "challenge_expires_in",
+                                                "resend_available_in", "otp_required": true }
+
+POST    /auth/login-email          - Step 1 (passwordless): Email-only - dispatch an OTP to the address
+                                     Body: { "email": "..." }
+                                     Returns: same shape as /auth/login (anti-enumeration:
+                                              identical response whether or not the email exists)
+
+POST    /auth/verify-otp           - Step 2: Exchange OTP for the final JWT (works for all flows
+                                     including /auth/register)
+                                     Body: { "challenge_token": "...", "otp": "123456" }
+                                     Returns: { "access_token", "token_type", "expires_in" }
+
+POST    /auth/resend-otp           - Re-send OTP for an active challenge (subject to cooldown).
+                                     The challenge_token is rotation-stable: the same token keeps
+                                     working across multiple resends until the OTP is consumed.
+                                     Body: { "challenge_token": "..." }
+
+Security:
+  - OTP is hashed (SHA-256 + pepper) before storage; plaintext only sent by email
+  - Challenge token is hashed before storage; sent back as opaque string
+  - OTP expires in OTP_EXPIRE_MINUTES (default 5)
+  - Max OTP_MAX_ATTEMPTS (default 5) verify attempts per OTP, then locked
+  - Login rate limit: OTP_LOGIN_RATE_LIMIT_PER_HOUR per (email, IP)
+  - Verify rate limit: OTP_VERIFY_RATE_LIMIT_PER_MINUTE per IP
+  - Resend cooldown: OTP_RESEND_COOLDOWN_SECONDS (default 30)
 
 USER MANAGEMENT
 ---------------
 POST    /users/register            - Register new user
-POST    /users/login               - User login
+POST    /users/login               - 2FA Step 1 (alias of /auth/login, returns challenge_token)
 GET     /users/                    - List all users
 GET     /users/count               - Get user count
 GET     /users/{user_id}           - Get specific user

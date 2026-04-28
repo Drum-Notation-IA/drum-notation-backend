@@ -2,7 +2,7 @@ import os
 import time
 import logging
 from pathlib import Path
-from fastapi import FastAPI, File, UploadFile, Depends, HTTPException
+from fastapi import FastAPI, File, UploadFile, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,6 +14,7 @@ import app.db.models  # noqa: F401
 from app.core.database import get_db
 from app.modules.users.schemas import UserLogin, UserCreate
 from app.modules.audio_processing.router import router as audio_router
+from app.modules.auth.router import router as auth_router
 from app.modules.jobs.router import router as jobs_router
 from app.modules.jobs.worker import start_job_processor, stop_job_processor
 from app.modules.media.routers import router as video_router
@@ -37,6 +38,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(roles_router)
 app.include_router(video_router)
@@ -72,6 +74,22 @@ async def health_check():
         "timestamp": time.time(),
         "message": "Backend is running"
     }
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """Basic WS endpoint for frontend dev connectivity checks."""
+    await websocket.accept()
+    await websocket.send_json({"type": "connected", "message": "WebSocket ready"})
+    try:
+        while True:
+            message = await websocket.receive_text()
+            if message.lower() == "ping":
+                await websocket.send_text("pong")
+            else:
+                await websocket.send_text(f"echo: {message}")
+    except WebSocketDisconnect:
+        logger.info("WebSocket client disconnected")
 
 
 # Add root-level endpoints that frontend expects
@@ -261,24 +279,46 @@ async def api_auth_login(login_data: dict):
         raise HTTPException(status_code=400, detail="Email and password required")
 
 
-@app.post("/api/auth/register")
-async def api_auth_register(user_data: dict):
-    """API auth register endpoint - simplified for demo"""
-    email = user_data.get("email", "")
-    password = user_data.get("password", "")
+@app.post("/api/auth/register", status_code=201)
+async def api_auth_register(
+    user_data: dict,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Register a user and dispatch a confirmation OTP to the registered email.
 
-    if email and password and len(password) >= 6:
-        return {
-            "id": "demo-user-id",
-            "email": email,
-            "name": user_data.get("name", "Demo User"),
-            "created_at": time.time(),
-            "demo_mode": True,
-            "message": "Demo registration successful"
-        }
-    else:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=400, detail="Valid email and password (6+ chars) required")
+    Frontend-compatible alias for ``POST /auth/register``: same payload shape
+    (``{email, password}``), same response envelope (``LoginChallengeResponse``).
+    The client should follow up with ``POST /auth/verify-otp`` using the
+    returned ``challenge_token`` and the code delivered to the inbox.
+    """
+    from app.modules.auth.schemas import RegisterRequest
+    from app.modules.auth.service import AuthService
+
+    try:
+        payload = RegisterRequest(
+            email=user_data.get("email", ""),
+            password=user_data.get("password", ""),
+        )
+    except Exception as exc:  # noqa: BLE001 - normalize Pydantic errors to 400
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    fwd = request.headers.get("x-forwarded-for")
+    ip = (
+        fwd.split(",")[0].strip()
+        if fwd
+        else (request.client.host if request.client else None)
+    )
+    user_agent = request.headers.get("user-agent")
+
+    challenge = await AuthService().register(
+        db,
+        email=str(payload.email),
+        password=payload.password,
+        ip_address=ip,
+        user_agent=user_agent,
+    )
+    return challenge
 
 
 @app.get("/api/auth/me")
@@ -297,50 +337,68 @@ async def api_auth_me():
 
 @app.post("/api/videos/upload")
 async def api_videos_upload(file: UploadFile = File(...)):
-    """API videos upload endpoint - simplified for demo"""
+    """API videos upload endpoint - simplified for demo.
+
+    Validation errors (missing filename, unsupported extension) are raised
+    *outside* the I/O try/except so they propagate as proper 4xx responses.
+    The try/except only wraps disk I/O so the original ``OSError`` (e.g.
+    ``ENOSPC`` when the disk is full) can be surfaced with the right HTTP
+    status and a useful message.
+    """
+    supported_video = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
+
+    # --- 4xx validation (do NOT swallow into a 500) ---
+    if not file.filename:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing filename. The upload must include a file with a name.",
+        )
+
+    file_ext = Path(file.filename).suffix.lower()
+    if file_ext not in supported_video:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported file type: {file_ext or '(none)'}. "
+                f"Supported: {sorted(supported_video)}"
+            ),
+        )
+
+    # --- I/O (5xx territory) ---
+    temp_path: str | None = None
     try:
-        # Validate file type
-        supported_video = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
-        file_ext = Path(file.filename).suffix.lower() if file.filename else ""
-
-        if file_ext not in supported_video:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported file type: {file_ext}. Supported: {list(supported_video)}"
-            )
-
-        # Read and save file temporarily
         content = await file.read()
-        temp_path = f"uploads/temp_{int(time.time())}_{file.filename}"
-
-        # Ensure uploads directory exists
         os.makedirs("uploads", exist_ok=True)
-
+        temp_path = f"uploads/temp_{int(time.time())}_{file.filename}"
         with open(temp_path, "wb") as f:
             f.write(content)
-
-        # Return upload response
-        return {
-            "success": True,
-            "video_id": f"demo-video-{int(time.time())}",
-            "filename": file.filename,
-            "file_size_bytes": len(content),
-            "file_size_mb": round(len(content) / (1024 * 1024), 2),
-            "format": file_ext,
-            "upload_path": temp_path,
-            "status": "uploaded",
-            "demo_mode": True,
-            "message": "Video uploaded successfully in demo mode",
-            "timestamp": time.time()
-        }
-
-    except Exception as e:
-        error_msg = f"Video upload failed: {str(e)}"
-        print(error_msg)  # Fallback logging
+    except OSError as exc:
+        # errno 28 == ENOSPC ("No space left on device") -> 507 Insufficient Storage
+        logger.exception("Video upload I/O failed (path=%s)", temp_path)
+        raise HTTPException(
+            status_code=507 if exc.errno == 28 else 500,
+            detail=f"Disk error while saving upload: {exc.strerror or exc}",
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 - last-resort surface for diagnostics
+        logger.exception("Unexpected error while saving uploaded video")
         raise HTTPException(
             status_code=500,
-            detail=f"Upload failed: {str(e)}"
-        )
+            detail=f"Upload failed: {exc!s}",
+        ) from exc
+
+    return {
+        "success": True,
+        "video_id": f"demo-video-{int(time.time())}",
+        "filename": file.filename,
+        "file_size_bytes": len(content),
+        "file_size_mb": round(len(content) / (1024 * 1024), 2),
+        "format": file_ext,
+        "upload_path": temp_path,
+        "status": "uploaded",
+        "demo_mode": True,
+        "message": "Video uploaded successfully in demo mode",
+        "timestamp": time.time(),
+    }
 
 
 @app.post("/api/videos/analyze/{video_id}")

@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import List, Optional
 from uuid import UUID
 
-from sqlalchemy import and_, select, update
+from sqlalchemy import and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -23,10 +23,15 @@ class UserRepository:
         return result.scalar_one_or_none()
 
     async def get_by_email(self, db: AsyncSession, email: str) -> Optional[User]:
-        """Get user by email (excluding soft deleted)"""
+        """Get user by email (case-insensitive, excluding soft deleted)."""
         query = (
             select(User)
-            .where(and_(User.email == email, User.deleted_at.is_(None)))
+            .where(
+                and_(
+                    func.lower(User.email) == email.lower(),
+                    User.deleted_at.is_(None),
+                )
+            )
             .options(selectinload(User.roles))
         )
         result = await db.execute(query)
@@ -152,9 +157,12 @@ class UserRepository:
     async def email_exists(
         self, db: AsyncSession, email: str, exclude_user_id: Optional[UUID] = None
     ) -> bool:
-        """Check if email already exists (excluding soft deleted)"""
+        """Check if email already exists (case-insensitive, excluding soft deleted)."""
         query = select(User.id).where(
-            and_(User.email == email, User.deleted_at.is_(None))
+            and_(
+                func.lower(User.email) == email.lower(),
+                User.deleted_at.is_(None),
+            )
         )
 
         if exclude_user_id:
@@ -164,10 +172,15 @@ class UserRepository:
         return result.scalar_one_or_none() is not None
 
     async def authenticate(self, db: AsyncSession, email: str) -> Optional[User]:
-        """Get user for authentication (returns user with password_hash)"""
+        """Get user for authentication (case-insensitive email match)."""
         query = (
             select(User)
-            .where(and_(User.email == email, User.deleted_at.is_(None)))
+            .where(
+                and_(
+                    func.lower(User.email) == email.lower(),
+                    User.deleted_at.is_(None),
+                )
+            )
             .options(selectinload(User.roles))
         )
         result = await db.execute(query)

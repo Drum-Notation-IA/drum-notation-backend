@@ -1,6 +1,7 @@
 # Import all models here to ensure they are registered with SQLAlchemy
 # This file should be imported in main.py or wherever the database is initialized
 
+from app.modules.auth.models import OTPCode
 from app.modules.jobs.models import ProcessingJob
 from app.modules.media.models import AudioFile, Video
 from app.modules.notation.models import DrumNotation, OpenAIEnrichment
@@ -18,4 +19,5 @@ __all__ = [
     "ProcessingJob",
     "DrumNotation",
     "OpenAIEnrichment",
+    "OTPCode",
 ]

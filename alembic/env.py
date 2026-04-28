@@ -10,6 +10,7 @@ from app.db.base import Base
 # IMPORTANT: Import all models to ensure they are registered with SQLAlchemy
 # These imports appear "unused" but are required for Alembic to detect models
 # pyright: reportUnusedImport=false
+from app.modules.auth.models import OTPCode  # noqa: F401
 from app.modules.jobs.models import ProcessingJob  # noqa: F401
 from app.modules.media.models import AudioFile, Video  # noqa: F401
 from app.modules.notation.models import DrumNotation, OpenAIEnrichment  # noqa: F401
