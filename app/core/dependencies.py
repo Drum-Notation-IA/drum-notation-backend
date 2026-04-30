@@ -11,6 +11,7 @@ from app.modules.users.models import User
 from app.modules.users.repository import UserRepository
 
 security = HTTPBearer()
+optional_security = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
@@ -45,6 +46,32 @@ async def get_current_user(
         raise credentials_exception
 
     return user
+
+
+async def get_optional_current_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(optional_security),
+    db: AsyncSession = Depends(get_db),
+) -> Optional[User]:
+    """
+    Like get_current_user but returns None instead of raising 401.
+    Useful for endpoints that support both authenticated and demo flows.
+    """
+    if not credentials:
+        return None
+    try:
+        payload = jwt.decode(
+            credentials.credentials,
+            settings.SECRET_KEY,
+            algorithms=[settings.ALGORITHM],
+        )
+        email = payload.get("sub")
+        if not email:
+            return None
+        user_repo = UserRepository()
+        user = await user_repo.get_by_email(db, email=email)
+        return user  # may be None if user not found
+    except JWTError:
+        return None
 
 
 async def get_current_active_user(

@@ -96,19 +96,38 @@ async def get_my_videos(
     )
 
 
-@router.get("/{video_id}", response_model=VideoRead)
+@router.get("/{video_id}")
 async def get_video(
-    video_id: UUID,
+    video_id: str,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
     Get video information by ID
 
-    - **video_id**: The UUID of the video
+    - **video_id**: The UUID of the video (or a demo ID)
     """
+    # Demo mode: non-UUID video IDs (e.g. "demo-video-1777434567")
+    def _is_uuid(val: str) -> bool:
+        try:
+            UUID(val)
+            return True
+        except (ValueError, AttributeError):
+            return False
+
+    if not _is_uuid(video_id):
+        from datetime import datetime
+        return {
+            "id": video_id,
+            "video_id": video_id,
+            "status": "ready",
+            "demo_mode": True,
+            "created_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+
     return await video_service.get_video_by_id(
-        db=db, video_id=video_id, user_id=UUID(str(current_user.id))
+        db=db, video_id=UUID(video_id), user_id=UUID(str(current_user.id))
     )
 
 

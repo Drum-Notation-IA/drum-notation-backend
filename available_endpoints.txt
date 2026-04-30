@@ -1,334 +1,321 @@
-DRUM NOTATION BACKEND - AVAILABLE API ENDPOINTS
+﻿DRUM NOTATION BACKEND - AVAILABLE API ENDPOINTS
 =====================================================
 
-Last Updated: January 2025
-Backend Servers Running:
-- Main Backend (Port 8000): Full-featured drum notation backend
-- ML Backend (Port 8001): Specialized machine learning backend
+Last Updated: April 2026
+Backend: http://localhost:8000  (uvicorn --reload)
+Docs:    http://localhost:8000/docs
 
 =====================================================
-MAIN BACKEND (http://localhost:8000)
+ROOT / MISC
 =====================================================
 
-ROOT ENDPOINTS
---------------
 GET     /                           - Welcome message
 GET     /health                     - Health check
-POST    /analyze                    - File analysis (redirects to ML analyze)
-GET     /models                     - Available ML models
 GET     /datasets                   - Available datasets
+GET     /models                     - Available ML models
 GET     /analytics/performance      - Performance analytics
-GET     /analytics/usage           - Usage analytics
+GET     /analytics/usage            - Usage analytics
+POST    /analyze                    - Direct file analysis (no storage)
+WS      /ws                         - WebSocket (ping/echo; auto-connected on login)
 
-AUTHENTICATION ENDPOINTS (frontend-compatible aliases)
--------------------------------------------------------
-POST    /api/auth/login            - User login (simplified for demo)
-POST    /api/auth/register         - Real registration: creates the user and dispatches an OTP to
-                                     the registered email. Body: { "email": "...", "password": "..." }
-                                     Returns the same LoginChallengeResponse shape as /auth/register,
-                                     so the client can navigate straight to the OTP verification UI.
-GET     /api/auth/me               - Current user information
+=====================================================
+AUTHENTICATION  (2FA / OTP FLOW)
+=====================================================
 
-2FA / OTP AUTHENTICATION (PRIMARY LOGIN FLOW)
----------------------------------------------
-POST    /auth/register             - Sign-up + email verification in one step.
-                                     Body: { "email": "...", "password": "..." }
-                                     Returns: { "challenge_token", "masked_destination",
-                                                "expires_in", "challenge_expires_in",
-                                                "resend_available_in", "otp_required": true }
-                                     Errors: 409 Conflict if the email is already registered.
-                                     Follow up with POST /auth/verify-otp using the OTP delivered
-                                     to the inbox to finish onboarding and receive the JWT.
+Primary flow
+------------
+POST    /auth/register              - Sign-up + email OTP dispatch
+                                      Body: { "email", "password" }
+                                      Returns: { challenge_token, masked_destination,
+                                                 expires_in, otp_required: true }
+                                      Errors: 409 if email already registered
+                                      Follow up with POST /auth/verify-otp
 
-POST    /auth/login                - Step 1 (credentials): Validate email+password and email an OTP
-                                     Body: { "email": "...", "password": "..." }
-                                     Returns: { "challenge_token", "masked_destination",
-                                                "expires_in", "challenge_expires_in",
-                                                "resend_available_in", "otp_required": true }
+POST    /auth/login                 - Step 1 - validate credentials + email OTP
+                                      Body: { "email", "password" }
+                                      Returns: same shape as /auth/register
 
-POST    /auth/login-email          - Step 1 (passwordless): Email-only - dispatch an OTP to the address
-                                     Body: { "email": "..." }
-                                     Returns: same shape as /auth/login (anti-enumeration:
-                                              identical response whether or not the email exists)
+POST    /auth/login-email           - Step 1 - passwordless (OTP only)
+                                      Body: { "email" }
+                                      Anti-enumeration: identical response whether email exists or not
 
-POST    /auth/verify-otp           - Step 2: Exchange OTP for the final JWT (works for all flows
-                                     including /auth/register)
-                                     Body: { "challenge_token": "...", "otp": "123456" }
-                                     Returns: { "access_token", "token_type", "expires_in" }
+POST    /auth/verify-otp            - Step 2 - exchange OTP for JWT
+                                      Body: { "challenge_token", "otp" }
+                                      Returns: { access_token, token_type, expires_in }
 
-POST    /auth/resend-otp           - Re-send OTP for an active challenge (subject to cooldown).
-                                     The challenge_token is rotation-stable: the same token keeps
-                                     working across multiple resends until the OTP is consumed.
-                                     Body: { "challenge_token": "..." }
+POST    /auth/resend-otp            - Re-send OTP (subject to cooldown)
+                                      Body: { "challenge_token" }
 
-Security:
-  - OTP is hashed (SHA-256 + pepper) before storage; plaintext only sent by email
-  - Challenge token is hashed before storage; sent back as opaque string
-  - OTP expires in OTP_EXPIRE_MINUTES (default 5)
-  - Max OTP_MAX_ATTEMPTS (default 5) verify attempts per OTP, then locked
+Frontend-compatible aliases (demo / simplified)
+------------------------------------------------
+POST    /api/auth/login             - Simplified login alias (demo mode)
+POST    /api/auth/register          - Simplified register alias (demo mode)
+GET     /api/auth/me                - Current user info (no auth required)
+
+Security notes:
+  - OTP hashed (SHA-256 + pepper) before storage; plaintext only sent by email
+  - Challenge token hashed before storage
+  - OTP expires in OTP_EXPIRE_MINUTES (default 5 min)
+  - Max OTP_MAX_ATTEMPTS (default 5) per OTP before lock
   - Login rate limit: OTP_LOGIN_RATE_LIMIT_PER_HOUR per (email, IP)
   - Verify rate limit: OTP_VERIFY_RATE_LIMIT_PER_MINUTE per IP
-  - Resend cooldown: OTP_RESEND_COOLDOWN_SECONDS (default 30)
+  - Resend cooldown: OTP_RESEND_COOLDOWN_SECONDS (default 30 s)
 
+=====================================================
 USER MANAGEMENT
----------------
-POST    /users/register            - Register new user
-POST    /users/login               - 2FA Step 1 (alias of /auth/login, returns challenge_token)
-GET     /users/                    - List all users
-GET     /users/count               - Get user count
-GET     /users/{user_id}           - Get specific user
-PUT     /users/{user_id}           - Update user
-DELETE  /users/{user_id}           - Delete user (soft)
-POST    /users/{user_id}/restore   - Restore deleted user
-DELETE  /users/{user_id}/permanent - Permanently delete user
-POST    /users/{user_id}/change-password - Change user password
-GET     /users/email/{email}       - Get user by email
+=====================================================
 
+POST    /users/register                          - Register new user
+POST    /users/login                             - 2FA Step 1 alias (returns challenge_token)
+GET     /users/                                  - List all users          [auth required]
+GET     /users/count                             - User count              [auth required]
+GET     /users/email/{email}                     - Get user by email       [auth required]
+GET     /users/{user_id}                         - Get user                [auth required]
+PUT     /users/{user_id}                         - Update user             [auth required]
+DELETE  /users/{user_id}                         - Soft-delete user        [auth required]
+POST    /users/{user_id}/restore                 - Restore deleted user    [auth required]
+DELETE  /users/{user_id}/permanent               - Hard-delete user        [auth required]
+POST    /users/{user_id}/change-password         - Change password         [auth required]
+GET     /users/{user_id}/roles                   - Get user roles          [auth required]
+POST    /users/{user_id}/roles/{role_id}         - Assign role             [auth required]
+DELETE  /users/{user_id}/roles/{role_id}         - Remove role             [auth required]
+POST    /users/roles/                            - Create user-role entry  [auth required]
+GET     /users/roles/                            - List user-role entries  [auth required]
+GET     /users/roles/{role_id}                   - Get user-role by role   [auth required]
+GET     /users/roles/{role_id}/users             - Users with role         [auth required]
+
+=====================================================
 ROLE MANAGEMENT
----------------
-POST    /roles/                    - Create role
-GET     /roles/                    - List all roles
-GET     /roles/count               - Get role count
-GET     /roles/{role_id}           - Get specific role
-PUT     /roles/{role_id}           - Update role
-DELETE  /roles/{role_id}           - Delete role (soft)
-GET     /roles/name/{role_name}    - Get role by name
-POST    /roles/{role_id}/restore   - Restore deleted role
-DELETE  /roles/{role_id}/permanent - Permanently delete role
+=====================================================
 
-USER-ROLE ASSOCIATIONS
-----------------------
-GET     /users/roles/              - List user roles
-POST    /users/roles/              - Create user role
-POST    /users/{user_id}/roles/{role_id} - Assign role to user
-DELETE  /users/{user_id}/roles/{role_id} - Remove role from user
-GET     /users/{user_id}/roles     - Get user's roles
-GET     /users/roles/{role_id}/users - Get users with role
-GET     /users/roles/{role_id}     - Get user role details
-POST    /roles/{role_id}/users/{user_id} - Add user to role
-DELETE  /roles/{role_id}/users/{user_id} - Remove user from role
-GET     /roles/{role_id}/users     - Get role's users
-GET     /roles/users/{user_id}     - Get user's role info
-GET     /roles/users/{user_id}/check/{role_name} - Check if user has role
+POST    /roles/                                  - Create role             [auth required]
+GET     /roles/                                  - List roles              [auth required]
+GET     /roles/count                             - Role count              [auth required]
+GET     /roles/name/{role_name}                  - Get role by name        [auth required]
+GET     /roles/{role_id}                         - Get role                [auth required]
+PUT     /roles/{role_id}                         - Update role             [auth required]
+DELETE  /roles/{role_id}                         - Soft-delete role        [auth required]
+POST    /roles/{role_id}/restore                 - Restore role            [auth required]
+DELETE  /roles/{role_id}/permanent               - Hard-delete role        [auth required]
+GET     /roles/{role_id}/users                   - Users with this role    [auth required]
+POST    /roles/{role_id}/users/{user_id}         - Add user to role        [auth required]
+DELETE  /roles/{role_id}/users/{user_id}         - Remove user from role   [auth required]
+GET     /roles/users/{user_id}                   - Roles for user          [auth required]
+GET     /roles/users/{user_id}/check/{role_name} - Check if user has role  [auth required]
 
-VIDEO MANAGEMENT & UPLOAD (WORKFLOW STEP 1)
---------------------------------------------
-POST    /videos/upload             - Upload video file (original endpoint)
-POST    /api/videos/upload         - Upload video file (API alias)
-GET     /videos/                   - List videos
-GET     /videos/my-videos          - Get current user's videos
-GET     /videos/{video_id}         - Get specific video
-PUT     /videos/{video_id}         - Update video
-DELETE  /videos/{video_id}         - Delete video (soft)
-POST    /videos/{video_id}/restore - Restore deleted video
-GET     /videos/{video_id}/download - Download video file
-GET     /videos/stats/my-usage     - Get user's video stats
-GET     /videos/stats/storage      - Get storage statistics
-GET     /videos/info/supported-formats - Get supported video formats
-GET     /videos/{video_id}/processing-status - Get processing status
-POST    /videos/admin/cleanup-orphaned - Admin: cleanup orphaned videos
-GET     /videos/public/{video_id}  - Public video access
-GET     /videos/public/{video_id}/download - Public video download
-GET     /videos/bulk/my-videos/stats - Bulk video statistics
-POST    /videos/bulk/delete        - Bulk delete videos
+=====================================================
+VIDEO MANAGEMENT  (Workflow Step 1)
+=====================================================
 
-AUDIO EXTRACTION (WORKFLOW STEP 2)
------------------------------------
-POST    /videos/{video_id}/extract-audio - Extract audio from video (original)
-POST    /api/videos/{video_id}/extract-audio - Extract audio from video (API alias)
-POST    /audio/extract/{video_id}  - Extract audio from video
-GET     /audio/extract/{video_id}/status - Get extraction status
-GET     /audio/info/{video_id}     - Get audio information
-GET     /audio/features/{video_id} - Get audio features
+POST    /videos/upload                           - Upload video            [auth required]
+POST    /api/videos/upload                       - Upload video alias      [NO auth - demo mode]
+                                                   Returns: { id, video_id, filename,
+                                                              file_size_mb, upload_path,
+                                                              status, demo_mode }
+                                                   File saved to: uploads/videos/{id}.ext
 
-AUDIO SOURCE SEPARATION (WORKFLOW STEP 3 - OPTIONAL)
-----------------------------------------------------
-POST    /audio/separate-sources/{video_id} - Source separation (original)
-POST    /api/videos/{video_id}/separate-sources - Source separation (API alias)
-   Parameters: method=["spectral","nmf","ica"], save_sources=[true,false]
+GET     /videos/                                 - List videos             [auth required]
+GET     /videos/my-videos                        - Current user videos     [auth required]
+GET     /videos/stats/my-usage                   - User storage stats      [auth required]
+GET     /videos/stats/storage                    - Global storage stats    [auth required]
+GET     /videos/info/supported-formats           - Supported formats       [auth required]
+GET     /videos/bulk/my-videos/stats             - Bulk video stats        [auth required]
+POST    /videos/bulk/delete                      - Bulk delete             [auth required]
+POST    /videos/admin/cleanup-orphaned           - Admin cleanup           [auth required]
+GET     /videos/public/{video_id}                - Public video access     [NO auth]
+GET     /videos/public/{video_id}/download       - Public video download   [NO auth]
 
-POST    /audio/create-stems/{video_id} - Create audio stems (original)
-POST    /api/videos/{video_id}/create-stems - Create audio stems (API alias)
-   Parameters: export_format=["wav","flac","aiff"], bit_depth=[16,24,32], normalize=[true,false]
+GET     /videos/{video_id}                       - Get video metadata      [auth required]
+                                                   Accepts UUID or demo ID (demo-video-{ts})
+                                                   Demo IDs return demo JSON without DB lookup
+PUT     /videos/{video_id}                       - Update video            [auth required]
+DELETE  /videos/{video_id}                       - Soft-delete video       [auth required]
+POST    /videos/{video_id}/restore               - Restore video           [auth required]
+GET     /videos/{video_id}/download              - Download file           [auth required]
+GET     /videos/{video_id}/processing-status     - Processing status       [auth required]
+POST    /videos/{video_id}/extract-audio         - Extract audio           [auth required]
 
-AUDIO ENHANCEMENT (WORKFLOW STEP 4 - OPTIONAL)
------------------------------------------------
-POST    /audio/enhance-drums/{video_id} - Enhance drum audio (original)
-POST    /api/videos/{video_id}/enhance-drums - Enhance drum audio (API alias)
-   Parameters: drum_type=["kick","snare","hihat","cymbals","toms","all"], enhancement_strength=[0.0-1.0]
+API aliases (demo mode, no auth required)
+------------------------------------------
+GET     /api/videos/{video_id}                   - Video metadata          [NO auth]
+POST    /api/videos/{video_id}/extract-audio     - Extract audio           [NO auth]
+                                                   Tries real FFmpeg; falls back to demo JSON
+POST    /api/videos/{video_id}/separate-sources  - Source separation       [NO auth]
+POST    /api/videos/{video_id}/create-stems      - Create stems            [NO auth]
+POST    /api/videos/{video_id}/enhance-drums     - Enhance drums           [NO auth]
 
-DRUM ANALYSIS & DETECTION (WORKFLOW STEP 5)
---------------------------------------------
-POST    /analyze                   - Direct file analysis
-POST    /ml/analyze               - ML module analysis
-POST    /api/videos/analyze/{video_id} - Analyze uploaded video by ID (API alias)
-POST    /audio/analyze/{video_id}  - Analyze audio
-POST    /audio/detect-drums/{video_id} - Basic drum detection
-POST    /audio/detect-drums-advanced/{video_id} - Advanced drum detection
-GET     /audio/analysis/comprehensive/{video_id} - Comprehensive analysis
+=====================================================
+AUDIO EXTRACTION  (Workflow Step 2)
+=====================================================
 
-AUDIO PROCESSING OPTIONS & INFO
---------------------------------
-GET     /api/audio/processing-options - Get available processing methods and formats
-GET     /audio/settings/recommended - Get recommended settings
-GET     /audio/settings/supported-formats - Get supported audio formats
-GET     /audio/pipeline/{video_id} - Get processing pipeline status
+POST    /audio/extract/{video_id}                - Extract audio           [auth required]
+GET     /audio/extract/{video_id}/status         - Extraction status       [auth required]
+GET     /audio/info/{video_id}                   - Audio info              [auth required]
+GET     /audio/features/{video_id}               - Audio features          [auth required]
+GET     /audio/settings/recommended              - Recommended settings    [auth required]
+GET     /audio/settings/supported-formats        - Supported formats       [auth required]
+GET     /audio/pipeline/{video_id}               - Pipeline status         [auth required]
+GET     /api/audio/processing-options            - Processing options      [NO auth]
 
+=====================================================
+AUDIO SOURCE SEPARATION  (Workflow Step 3 - optional)
+=====================================================
+
+POST    /audio/separate-sources/{video_id}       - Source separation       [auth required]
+POST    /api/videos/{video_id}/separate-sources  - Source separation alias [NO auth]
+  Params: method=["spectral","nmf","ica"]  save_sources=[true,false]
+
+POST    /audio/create-stems/{video_id}           - Create stems            [auth required]
+POST    /api/videos/{video_id}/create-stems      - Create stems alias      [NO auth]
+  Params: export_format=["wav","flac","aiff"]  bit_depth=[16,24,32]  normalize=[true,false]
+
+=====================================================
+AUDIO ENHANCEMENT  (Workflow Step 4 - optional)
+=====================================================
+
+POST    /audio/enhance-drums/{video_id}          - Enhance drums           [auth required]
+POST    /api/videos/{video_id}/enhance-drums     - Enhance drums alias     [NO auth]
+  Params: drum_type=["kick","snare","hihat","cymbals","toms","all"]
+          enhancement_strength=[0.0-1.0]
+
+=====================================================
+DRUM ANALYSIS & DETECTION  (Workflow Step 5)
+=====================================================
+
+POST    /api/videos/analyze/{video_id}           - Analyze video           [NO auth - demo mode]
+                                                   Searches uploads/videos/{id}.*
+                                                   and uploads/temp_{ts}_* for the file.
+                                                   Always returns demo analysis JSON.
+POST    /audio/analyze/{video_id}                - Analyze audio           [auth required]
+POST    /audio/detect-drums/{video_id}           - Basic drum detection    [auth required]
+POST    /audio/detect-drums-advanced/{video_id}  - Advanced detection      [auth required]
+GET     /audio/analysis/comprehensive/{video_id} - Comprehensive analysis  [auth required]
+POST    /ml/analyze                              - ML module analysis      [auth required]
+GET     /audio/admin/statistics                  - Admin audio stats       [auth required]
+POST    /audio/admin/cleanup-temp                - Admin cleanup temp      [auth required]
+
+=====================================================
+NOTATION GENERATION  (Workflow Step 6)
+=====================================================
+
+POST    /notation/                               - Create notation
+                                                   DEMO MODE: if video_id is NOT a UUID
+                                                   (e.g. "demo-video-{ts}"), returns demo
+                                                   notation JSON without auth or DB write.
+                                                   REAL MODE: requires auth + valid UUID video_id.
+
+GET     /notation/                               - List notations
+                                                   Returns empty list if not authenticated.
+                                                   Authenticated: returns user notations via
+                                                   list_by_user_videos.
+
+GET     /notation/health                         - Notation system health
+GET     /notation/statistics                     - Notation statistics     [auth required]
+GET     /notation/drum-kits                      - Available drum kits     [auth required]
+GET     /notation/drum-kits/default              - Default drum kit        [auth required]
+POST    /notation/batch                          - Batch generate          [auth required]
+POST    /notation/admin/cleanup                  - Admin cleanup           [auth required]
+GET     /notation/admin/processing-queue         - Admin queue             [auth required]
+GET     /notation/video/{video_id}               - Notation for video      [auth required]
+DELETE  /notation/video/{video_id}               - Delete notation         [auth required]
+GET     /notation/{notation_id}                  - Get notation            [auth required]
+PATCH   /notation/{notation_id}                  - Update notation         [auth required]
+DELETE  /notation/{notation_id}                  - Delete notation         [auth required]
+GET     /notation/{notation_id}/details          - Detailed notation       [auth required]
+GET     /notation/{notation_id}/timeline         - Stroke timeline         [auth required]
+GET     /notation/{notation_id}/measures         - Measures                [auth required]
+GET     /notation/{notation_id}/strokes          - Strokes                 [auth required]
+POST    /notation/{notation_id}/ai-analysis      - AI enrichment           [auth required]
+POST    /notation/{notation_id}/export           - Export notation         [auth required]
+GET     /notation/{notation_id}/export/{export_id} - Get export           [auth required]
+POST    /notation/{notation_id}/validate         - Validate notation       [auth required]
+
+=====================================================
 JOB MANAGEMENT
---------------
-POST    /jobs/                     - Create job
-GET     /jobs/                     - List jobs
-GET     /jobs/{job_id}             - Get specific job
-PATCH   /jobs/{job_id}             - Update job
-DELETE  /jobs/{job_id}             - Delete job
-POST    /jobs/{job_id}/retry       - Retry job
-GET     /jobs/video/{video_id}     - Get jobs for video
-GET     /jobs/video/{video_id}/pipeline - Get video processing pipeline
-GET     /jobs/admin/statistics     - Admin: job statistics
-POST    /jobs/admin/cleanup        - Admin: cleanup jobs
-POST    /jobs/audio-extraction/{video_id} - Audio extraction job
-POST    /jobs/audio-analysis/{video_id} - Audio analysis job
-POST    /jobs/drum-detection/{video_id} - Drum detection job
-GET     /jobs/health               - Job system health
-GET     /jobs/queue-status         - Job queue status
-GET     /audio/jobs/my-jobs        - Get user's audio jobs
-POST    /audio/jobs/{job_id}/cancel - Cancel audio job
-POST    /audio/jobs/{job_id}/retry - Retry audio job
-
-NOTATION MANAGEMENT (WORKFLOW STEP 6)
---------------------------------------
-POST    /notation/                 - Create notation
-GET     /notation/                 - List notations
-GET     /notation/{notation_id}    - Get specific notation
-PATCH   /notation/{notation_id}    - Update notation
-DELETE  /notation/{notation_id}    - Delete notation
-GET     /notation/{notation_id}/details - Get notation details
-GET     /notation/{notation_id}/timeline - Get notation timeline
-GET     /notation/{notation_id}/measures - Get notation measures
-GET     /notation/{notation_id}/strokes - Get notation strokes
-POST    /notation/{notation_id}/ai-analysis - AI analysis of notation
-POST    /notation/{notation_id}/export - Export notation
-GET     /notation/{notation_id}/export/{export_id} - Get exported notation
-POST    /notation/batch            - Batch process notations
-GET     /notation/statistics       - Notation statistics
-GET     /notation/drum-kits        - Available drum kits
-GET     /notation/drum-kits/default - Default drum kit
-POST    /notation/{notation_id}/validate - Validate notation
-GET     /notation/health           - Notation system health
-GET     /notation/video/{video_id} - Get notation for video
-DELETE  /notation/video/{video_id} - Delete notation for video
-POST    /notation/admin/cleanup    - Admin: cleanup notations
-GET     /notation/admin/processing-queue - Admin: processing queue
-
-ADMIN & MAINTENANCE
--------------------
-POST    /audio/admin/cleanup-temp  - Admin: cleanup temp files
-GET     /audio/admin/statistics    - Admin: get audio statistics
-
-MACHINE LEARNING (ML MODULE)
------------------------------
-GET     /ml/health                 - ML system health
-POST    /ml/analyze               - Analyze audio/video file
-GET     /ml/models                 - Available ML models
-GET     /ml/datasets               - ML datasets
-GET     /ml/analytics/performance  - ML performance analytics
-GET     /ml/analytics/usage        - ML usage analytics
-POST    /ml/debug-upload           - Debug file upload
-
-=====================================================
-ML BACKEND (http://localhost:8001)
 =====================================================
 
-CORE ML ENDPOINTS
------------------
-GET     /                          - ML backend welcome
-GET     /health                    - ML backend health
-POST    /analyze                   - Real ML analysis (primary)
-POST    /batch-analyze             - Batch ML analysis
-GET     /models                    - ML models (real ML backend)
-GET     /stats                     - ML system statistics
-POST    /debug-upload              - ML debug upload
-GET     /datasets                  - ML datasets
-GET     /analytics/performance     - ML performance analytics
-GET     /analytics/usage          - ML usage analytics
+POST    /jobs/                                   - Create job              [auth required]
+GET     /jobs/                                   - List jobs               [auth required]
+GET     /jobs/health                             - Job system health
+GET     /jobs/queue-status                       - Queue status            [auth required]
+GET     /jobs/admin/statistics                   - Admin job stats         [auth required]
+POST    /jobs/admin/cleanup                      - Admin cleanup           [auth required]
+POST    /jobs/audio-extraction/{video_id}        - Audio extraction job    [auth required]
+POST    /jobs/audio-analysis/{video_id}          - Audio analysis job      [auth required]
+POST    /jobs/drum-detection/{video_id}          - Drum detection job      [auth required]
+GET     /jobs/video/{video_id}                   - Jobs for video          [auth required]
+GET     /jobs/video/{video_id}/pipeline          - Pipeline for video      [auth required]
+GET     /jobs/{job_id}                           - Get job                 [auth required]
+PATCH   /jobs/{job_id}                           - Update job              [auth required]
+DELETE  /jobs/{job_id}                           - Delete job              [auth required]
+POST    /jobs/{job_id}/retry                     - Retry job               [auth required]
+GET     /audio/jobs/my-jobs                      - User audio jobs         [auth required]
+POST    /audio/jobs/{job_id}/cancel              - Cancel audio job        [auth required]
+POST    /audio/jobs/{job_id}/retry               - Retry audio job         [auth required]
+
+=====================================================
+MACHINE LEARNING MODULE
+=====================================================
+
+GET     /ml/health                               - ML system health
+POST    /ml/analyze                              - ML analysis             [auth required]
+GET     /ml/models                               - Available models
+GET     /ml/datasets                             - Datasets
+GET     /ml/analytics/performance                - ML performance analytics
+GET     /ml/analytics/usage                      - ML usage analytics
+POST    /ml/debug-upload                         - Debug file upload
 
 =====================================================
 COMPLETE DRUM PROCESSING WORKFLOW
 =====================================================
 
-WORKFLOW 1: BASIC ANALYSIS (FASTEST)
+WORKFLOW 1: BASIC  (demo - no auth)
 =====================================
-1. POST /api/videos/upload          → Upload video file
-2. POST /api/videos/analyze/{video_id} → Analyze for drum detection
+1. POST /api/videos/upload
+2. POST /api/videos/analyze/{video_id}
+3. POST /notation/                               Body: { "video_id": "demo-video-{ts}" }
 
-Result: Basic drum detection with confidence scores
+WORKFLOW 2: ENHANCED  (demo - no auth)
+========================================
+1. POST /api/videos/upload
+2. POST /api/videos/{video_id}/extract-audio
+3. POST /api/videos/{video_id}/separate-sources?method=spectral&save_sources=true
+4. POST /api/videos/{video_id}/enhance-drums?drum_type=all&enhancement_strength=0.4
+5. POST /api/videos/analyze/{video_id}
+6. POST /notation/                               Body: { "video_id": "demo-video-{ts}" }
 
-WORKFLOW 2: ENHANCED ANALYSIS (RECOMMENDED)
-============================================
-1. POST /api/videos/upload          → Upload video file
-2. POST /api/videos/{video_id}/extract-audio → Extract audio (optional)
-3. POST /api/videos/{video_id}/separate-sources → Separate drum sources
-4. POST /api/videos/{video_id}/enhance-drums → Enhance drum sounds
-5. POST /api/videos/analyze/{video_id} → Analyze enhanced audio
-
-Result: High-quality drum detection with source separation
-
-WORKFLOW 3: PROFESSIONAL ANALYSIS (HIGHEST QUALITY)
-===================================================
-1. POST /api/videos/upload          → Upload video file
-2. POST /api/videos/{video_id}/extract-audio → Extract audio
-3. POST /api/videos/{video_id}/separate-sources → Separate drum sources
-4. POST /api/videos/{video_id}/create-stems → Create professional stems
-5. POST /api/videos/{video_id}/enhance-drums → Enhance each drum type
-6. POST /api/videos/analyze/{video_id} → Comprehensive analysis
-7. POST /notation/                  → Create musical notation from results
-
-Result: Professional-grade analysis with notation generation
-
-WORKFLOW 4: DIRECT FILE ANALYSIS (NO STORAGE)
-==============================================
-1. POST /analyze                    → Direct file upload and analysis
-
-Result: Immediate analysis without storing video
+WORKFLOW 3: PRODUCTION  (auth required, real DB)
+=================================================
+1. POST /auth/login  ->  POST /auth/verify-otp  ->  JWT
+2. POST /videos/upload
+3. POST /videos/{uuid}/extract-audio
+4. POST /audio/separate-sources/{uuid}
+5. POST /audio/enhance-drums/{uuid}
+6. POST /audio/analyze/{uuid}
+7. POST /notation/                               Body: { "video_id": "{uuid}" }
 
 =====================================================
-FRONTEND INTEGRATION EXAMPLES
+FRONTEND INTEGRATION  (JavaScript / TypeScript)
 =====================================================
 
-JavaScript/TypeScript Implementation:
+// Demo workflow - no auth required
+async function demoWorkflow(videoFile) {
+  const fd = new FormData();
+  fd.append('file', videoFile);
 
-// Basic Workflow
-async function basicDrumAnalysis(videoFile) {
-  // Step 1: Upload
-  const formData = new FormData();
-  formData.append('file', videoFile);
-  const upload = await fetch('/api/videos/upload', {
+  const { id } = await fetch('/api/videos/upload', { method: 'POST', body: fd })
+    .then(r => r.json());
+
+  await fetch(`/api/videos/${id}/extract-audio`, { method: 'POST' });
+  await fetch(`/api/videos/analyze/${id}`, { method: 'POST' });
+
+  const notation = await fetch('/notation/', {
     method: 'POST',
-    body: formData
-  });
-  const uploadResult = await upload.json();
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ video_id: id, time_signature: '4/4' }),
+  }).then(r => r.json());
 
-  // Step 2: Analyze
-  const analysis = await fetch(`/api/videos/analyze/${uploadResult.video.id}`, {
-    method: 'POST'
-  });
-  return await analysis.json();
-}
-
-// Enhanced Workflow
-async function enhancedDrumAnalysis(videoFile) {
-  const upload = await uploadVideo(videoFile);
-  const videoId = upload.video.id;
-
-  // Separate sources
-  await fetch(`/api/videos/${videoId}/separate-sources?method=spectral`);
-
-  // Enhance drums
-  await fetch(`/api/videos/${videoId}/enhance-drums?drum_type=all&enhancement_strength=0.4`);
-
-  // Final analysis
-  const analysis = await fetch(`/api/videos/analyze/${videoId}`, { method: 'POST' });
-  return await analysis.json();
+  return notation; // { id, video_id, tempo, notation_json, demo_mode: true }
 }
 
 =====================================================
@@ -336,95 +323,27 @@ AUDIO PROCESSING PARAMETERS
 =====================================================
 
 Source Separation Methods:
-- "spectral" (recommended): Fast spectral masking
-- "nmf": Non-negative Matrix Factorization
-- "ica": Independent Component Analysis (requires stereo)
+  spectral (default/recommended) - fast spectral masking
+  nmf                            - Non-negative Matrix Factorization
+  ica                            - Independent Component Analysis (stereo only)
 
-Enhancement Types:
-- "kick", "snare", "hihat", "cymbals", "toms", "all"
+Enhancement drum_type values:
+  kick | snare | hihat | cymbals | toms | all
 
-Export Formats:
-- Audio: "wav", "flac", "aiff"
-- Bit Depth: 16, 24, 32
+Stem export formats:   wav | flac | aiff
+Stem bit depths:       16 | 24 | 32
 
-Video Formats Supported:
-- .mp4, .avi, .mov, .mkv, .webm
-
-Audio Formats Supported:
-- .wav, .mp3, .flac, .m4a, .ogg
+Supported video input:  .mp4  .avi  .mov  .mkv  .webm
+Supported audio input:  .wav  .mp3  .flac  .m4a  .ogg
 
 =====================================================
-EXPECTED RESPONSE FORMATS
+KNOWN DEMO-MODE BEHAVIOURS  (non-UUID video IDs)
 =====================================================
 
-Upload Response:
-{
-  "message": "Video uploaded successfully",
-  "video": {
-    "id": "uuid-string",
-    "filename": "video.mp4",
-    "duration_seconds": 5.095,
-    "created_at": "2025-01-08T16:54:18"
-  }
-}
-
-Analysis Response:
-{
-  "success": true,
-  "analysis": {
-    "results": {
-      "summary": {
-        "predicted_class": "snare",
-        "confidence": 0.85
-      },
-      "detailed_analysis": {
-        "predictions": {
-          "kick": 0.30,
-          "snare": 0.85,
-          "hihat": 0.40,
-          "cymbals": 0.15,
-          "toms": 0.10
-        },
-        "tempo_bpm": 120,
-        "drum_events": 20,
-        "duration_seconds": 31.8,
-        "video_info": {
-          "width": 720,
-          "height": 1280,
-          "fps": 30.0
-        }
-      }
-    }
-  }
-}
-
-Source Separation Response:
-{
-  "success": true,
-  "separated_sources": {
-    "kick": "uploads/separated/{video_id}_kick.wav",
-    "snare": "uploads/separated/{video_id}_snare.wav",
-    "hihat": "uploads/separated/{video_id}_hihat.wav",
-    "cymbals": "uploads/separated/{video_id}_cymbals.wav",
-    "toms": "uploads/separated/{video_id}_toms.wav"
-  }
-}
-
-=====================================================
-NOTES & REQUIREMENTS
-=====================================================
-
-1. Port 8000: Full-featured backend with complete workflow
-2. Port 8001: Specialized ML backend for advanced analysis
-3. FFmpeg required for video/audio processing
-4. All API endpoints support CORS for frontend integration
-5. File uploads use multipart/form-data format
-6. Video ID-based endpoints work with uploaded files only
-7. Direct analysis endpoints work with any file upload
-8. Processing is done server-side with real-time feedback
-9. Demo mode available for testing without full setup
-10. Professional workflow requires more processing time but yields better results
-
-For development: Use basic workflow (Steps 1-2)
-For production: Use enhanced workflow (Steps 1-5)
-For professional use: Use complete workflow (Steps 1-7)
+  GET  /videos/{demo-video-{ts}}          -> demo JSON (no DB, no auth check on non-UUIDs)
+  GET  /api/videos/{demo-video-{ts}}      -> demo JSON (no auth)
+  POST /api/videos/analyze/{id}           -> always returns demo analysis JSON
+                                             (file_found: true if file exists on disk)
+  POST /api/videos/{id}/extract-audio     -> tries FFmpeg; returns demo JSON on failure
+  POST /notation/                         -> demo notation JSON when video_id is not a UUID
+  GET  /notation/                         -> empty list when token is absent or expired
