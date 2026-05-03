@@ -19,23 +19,23 @@ class VideoStorage:
 
     def is_allowed_video_type(self, content_type: str, filename: str) -> bool:
         """Check if video file type is allowed"""
-        allowed_video_types = [
-            "video/mp4",
-            "video/quicktime",  # mov
-            "video/x-msvideo",  # avi
-            "video/x-matroska",  # mkv
-            "video/webm",
-        ]
-
         allowed_extensions = [".mp4", ".mov", ".avi", ".mkv", ".webm"]
 
-        # Check both content type and file extension
-        content_type_valid = content_type.lower() in allowed_video_types
-
+        # Extension is the authoritative signal — browsers and OS-level
+        # MIME detection vary too widely to rely on content-type alone.
         file_extension = Path(filename).suffix.lower()
-        extension_valid = file_extension in allowed_extensions
+        if file_extension not in allowed_extensions:
+            return False
 
-        return content_type_valid and extension_valid
+        # When the extension is valid, accept any content-type that starts with
+        # "video/" or "application/octet-stream" (generic binary upload) to
+        # tolerate browser-specific codec parameters like
+        # "video/mp4; codecs=avc1.42E01E".
+        ct_base = (content_type or "").lower().split(";")[0].strip()
+        return ct_base.startswith("video/") or ct_base in (
+            "application/octet-stream",
+            "",
+        )
 
     def get_file_extension(self, filename: str) -> str:
         """Extract file extension from filename"""

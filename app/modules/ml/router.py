@@ -2,663 +2,446 @@
 Machine Learning Router for Drum Notation Backend
 ================================================
 
-This module provides ML endpoints for drum audio/video analysis.
+Real ML endpoints backed by DrumDetector (librosa-based) for full drum analysis.
+Legacy upload endpoints kept for compatibility; new /ml/analyze-video/{video_id}
+runs the full pipeline on stored audio files.
 """
 
 import logging
+import os
+import subprocess
 import tempfile
 import time
-import subprocess
-import json
-import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
+from uuid import UUID
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
-from fastapi.responses import JSONResponse
+import numpy as np
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from sqlalchemy.ext.asyncio import AsyncSession
 
-# Configure logging
+from app.core.database import get_db
+from app.core.dependencies import get_current_user
+from app.modules.audio_processing.detection import DrumDetector, AUDIO_LIBS_AVAILABLE
+from app.modules.media.repository import AudioFileRepository
+from app.modules.users.models import User
+
 logger = logging.getLogger(__name__)
 
-router = APIRouter(
-    prefix="/ml",
-    tags=["machine-learning"],
-)
+router = APIRouter(prefix="/ml", tags=["machine-learning"])
 
+# ---------------------------------------------------------------------------
+# Shared detector instance
+# ---------------------------------------------------------------------------
+_detector = DrumDetector()
+_audio_repo = AudioFileRepository()
+
+
+# ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
 
 @router.get("/health")
 async def ml_health_check():
-    """Health check for ML services."""
+    """Health check: reports whether real librosa-based analysis is available."""
     return {
         "status": "healthy",
         "service": "ml",
         "timestamp": time.time(),
-        "demo_mode": True,
-        "message": "ML service is running in demo mode",
+        "demo_mode": not AUDIO_LIBS_AVAILABLE,
+        "librosa_available": AUDIO_LIBS_AVAILABLE,
+        "message": "Full ML analysis available" if AUDIO_LIBS_AVAILABLE
+                   else "Running in demo mode (librosa not available)",
     }
 
 
-@router.post("/analyze")
-async def analyze_audio(
-    file: UploadFile = File(..., description="Audio or video file to analyze")
+# ---------------------------------------------------------------------------
+# Shared core — reused by the HTTP endpoint AND the notation router
+# ---------------------------------------------------------------------------
+
+async def run_video_analysis(
+    video_id: UUID,
+    db: AsyncSession,
+    save_events: bool = False,
 ) -> Dict[str, Any]:
     """
-    Analyze an uploaded audio/video file for drum classification.
+    Run the full ML drum-detection pipeline for a stored video.
 
-    Args:
-        file: Audio file (.wav, .mp3, .flac, .m4a, .ogg) or video file (.mp4, .avi, etc.)
+    Flow:
+      1. Look up extracted AudioFile in DB.
+      2. POST audio to the external ML service (port 8001) to get onset_times.
+      3. If ML service is unavailable, fall back to local onset detection.
+      4. Classify each onset via local DrumDetector (spectral features).
+      5. Estimate tempo via librosa beat tracking.
 
-    Returns:
-        Analysis results including predicted drum class and confidence
+    Called by:
+      - POST /ml/analyze-video/{video_id}
+      - POST /notation/   (internal, no extra HTTP round-trip)
     """
+    if not AUDIO_LIBS_AVAILABLE:
+        raise HTTPException(503, "ML analysis unavailable — librosa not installed.")
 
-    # Validate file type
-    supported_audio = {".wav", ".mp3", ".flac", ".m4a", ".ogg"}
-    supported_video = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
-    all_supported = supported_audio.union(supported_video)
+    audio_files = await _audio_repo.get_by_video_id(db, video_id)
+    if not audio_files:
+        # Auto-extract audio from the stored video file so the caller doesn't
+        # need a separate extract-audio step before calling analyze.
+        try:
+            from app.modules.media.service import VideoService as _VideoService
+            from app.modules.media.repository import VideoRepository as _VideoRepo
+            from uuid import UUID as _UUID
+            _vrepo = _VideoRepo()
+            _video = await _vrepo.get_by_id(db, video_id)
+            if _video:
+                _svc = _VideoService()
+                await _svc.initiate_audio_extraction(
+                    db=db, video_id=video_id, user_id=_UUID(str(_video.user_id))
+                )
+                audio_files = await _audio_repo.get_by_video_id(db, video_id)
+        except Exception as _ex:
+            logger.warning(
+                "run_video_analysis: auto-extract failed for video %s: %s", video_id, _ex
+            )
 
-    file_ext = Path(file.filename).suffix.lower() if file.filename else ""
-
-    if file_ext not in all_supported:
+    if not audio_files:
         raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file type: {file_ext}. "
-            f"Supported: {list(all_supported)}",
+            404,
+            "No audio file found for this video. "
+            "Use POST /videos/{video_id}/extract-audio first.",
         )
 
+    audio_file = audio_files[0]
+    audio_path = str(audio_file.storage_path)
+
     try:
-        # Read file content
-        content = await file.read()
+        import librosa
+        from app.core.config import settings as _cfg
 
-        # Save uploaded file temporarily (for future ML processing)
-        with tempfile.NamedTemporaryFile(
-            delete=False, suffix=file_ext, prefix="drum_analysis_"
-        ) as temp_file:
-            temp_file.write(content)
-            temp_file_path = temp_file.name
+        start     = time.time()
+        y, sr     = librosa.load(audio_path, sr=_detector.config.sr)
+        duration  = float(len(y) / sr)
 
-        logger.info(f"Processing uploaded file: {file.filename} ({len(content)} bytes)")
+        # ── Step 1: Try external ML service for onset detection ──────────
+        onset_times_override: Optional[List[float]] = None
+        ml_service_used = False
 
-        # Simulate processing time
-        start_time = time.time()
+        try:
+            import httpx as _httpx
 
-        # Perform actual analysis based on file type
-        if file_ext in supported_video:
-            analysis_results = await analyze_video_file(temp_file_path, file.filename)
+            ml_url = _cfg.ML_SERVICE_URL.rstrip("/")
+            with open(audio_path, "rb") as audio_fh:
+                async with _httpx.AsyncClient(timeout=60.0) as client:
+                    resp = await client.post(
+                        f"{ml_url}/analyze",
+                        files={"file": (Path(audio_path).name, audio_fh, "audio/wav")},
+                    )
+
+            if resp.status_code == 200:
+                ml_data = resp.json()
+                onset_raw = ml_data.get("onset_times") or \
+                            ml_data.get("results", {}).get("summary", {}).get("onset_times", [])
+                if onset_raw:
+                    onset_times_override = [float(t) for t in onset_raw]
+                    ml_service_used = True
+                    logger.info(
+                        "ML service (%s) provided %d onset times for video %s",
+                        ml_url, len(onset_times_override), video_id,
+                    )
+            else:
+                logger.warning(
+                    "ML service returned HTTP %d for video %s — using local onset detection",
+                    resp.status_code, video_id,
+                )
+        except Exception as _ml_err:
+            logger.warning(
+                "ML service unavailable (%s) — falling back to local onset detection",
+                _ml_err,
+            )
+
+        # ── Step 2: Detect / use onset times ────────────────────────────
+        if onset_times_override is not None:
+            import numpy as _np
+            onsets = _np.array(onset_times_override, dtype=float)
         else:
-            analysis_results = await analyze_audio_file(temp_file_path, file.filename)
+            onsets = await _detector._detect_onsets(y, int(sr))
 
-        processing_time = time.time() - start_time
+        # ── Step 3: Extract features + classify each onset ───────────────
+        logger.info(
+            "ML pipeline: classifying %d onsets for video %s (ml_service_used=%s)",
+            len(onsets), video_id, ml_service_used,
+        )
+        features = await _detector._extract_onset_features(y, int(sr), onsets)
+        events_raw = await _detector._classify_drum_events(onsets, features, int(sr))
+        events: List = await _detector._post_process_events(events_raw)
 
-        # Clean up temp file
-        Path(temp_file_path).unlink(missing_ok=True)
+        # ── Step 4: Accurate tempo + time signature ───────────────────────
+        tempo_info = await _detector.detect_tempo_and_meter(y, int(sr))
+        tempo_bpm  = float(tempo_info.get("tempo", 120))
+        time_sig   = str(tempo_info.get("meter", "4/4"))
 
-        # Format response
-        response = {
-            "success": True,
-            "filename": file.filename,
-            "file_size_bytes": len(content),
-            "processing_time_seconds": round(processing_time, 3),
-            "results": analysis_results,
-            "timestamp": time.time(),
-            "demo_mode": False if analysis_results.get("real_analysis") else True,
-            "message": "Analysis completed using basic audio/video processing" if analysis_results.get("real_analysis") else "Using enhanced demo analysis"
+        # ── Step 5: Per-onset multi-class scores ──────────────────────────
+        per_onset_scores: List[Dict] = []
+        for onset_t, feat in zip(onsets, features):
+            scores_row = await _build_per_type_scores(_detector, feat)
+            per_onset_scores.append({"onset": float(onset_t), "scores": scores_row})
+
+        # ── Step 6: Statistics ────────────────────────────────────────────
+        stats = await _detector.get_drum_statistics(events)
+        instrument_counts: Dict[str, int] = {}
+        for e in events:
+            instrument_counts[e.drum_type] = instrument_counts.get(e.drum_type, 0) + 1
+
+        elapsed = time.time() - start
+        logger.info(
+            "ML pipeline done: %d events, tempo=%.1f BPM, time_sig=%s, "
+            "instruments=%s, ml_service_used=%s, elapsed=%.2fs",
+            len(events), tempo_bpm, time_sig,
+            list(instrument_counts.keys()), ml_service_used, elapsed,
+        )
+
+        return {
+            "video_id":               str(video_id),
+            "audio_file_id":          str(audio_file.id),
+            "duration_seconds":       round(duration, 2),
+            "processing_time_seconds": round(elapsed, 3),
+            "tempo_bpm":              round(tempo_bpm, 1),
+            "time_signature":         time_sig,
+            "total_events":           len(events),
+            "drum_events": [
+                {
+                    "time_seconds": float(e.timestamp),
+                    "instrument":   e.drum_type,
+                    "velocity":     round(float(e.velocity), 3),
+                    "confidence":   round(float(e.confidence), 3),
+                }
+                for e in events
+            ],
+            "per_onset_scores":  per_onset_scores,
+            "statistics":        stats,
+            "instrument_counts": instrument_counts,
+            "ml_service_used":   ml_service_used,
+            "ml_backend":        "librosa_rule_based_v2",
         }
 
-        logger.info(
-            f"✅ Analysis completed: {file.filename} -> "
-            f"{analysis_results['summary']['predicted_class']} "
-            f"(confidence: {analysis_results['summary']['confidence']:.2f})"
-        )
-
-        return response
-
-    except Exception as e:
-        # Clean up temp file on error
-        if "temp_file_path" in locals():
-            Path(temp_file_path).unlink(missing_ok=True)
-
-        logger.error(f"❌ Analysis failed for {file.filename}: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Analysis failed: {str(e)}"
-        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("ML analysis failed for video %s: %s", video_id, exc)
+        raise HTTPException(500, f"ML analysis failed: {str(exc)}")
 
 
-async def analyze_video_file(file_path: str, filename: str) -> Dict[str, Any]:
+# ---------------------------------------------------------------------------
+# Core ML — analyse a stored video/audio by DB video_id
+# ---------------------------------------------------------------------------
+
+@router.post("/analyze-video/{video_id}")
+async def ml_analyze_video(
+    video_id: UUID,
+    save_events: bool = Query(False, description="Persist detected events to DB"),
+    db: AsyncSession = Depends(get_db),
+):
     """
-    Analyze video file for drum detection using basic video processing.
+    Full ML drum analysis on a video already uploaded to the backend.
+
+    Returns every detected drum event with per-type confidence scores,
+    ready to be fed to POST /notation/.
     """
+    return await run_video_analysis(video_id, db, save_events=save_events)
+
+
+# ---------------------------------------------------------------------------
+# Core ML — file upload (kept for backward compat, now uses real DrumDetector)
+# ---------------------------------------------------------------------------
+
+@router.post("/analyze")
+async def analyze_audio_upload(
+    file: UploadFile = File(..., description="Audio or video file"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Analyse an uploaded audio/video file with the real DrumDetector.
+    No DB lookup required — works without auth for quick testing.
+    """
+    SUPPORTED_AUDIO = {".wav", ".mp3", ".flac", ".m4a", ".ogg"}
+    SUPPORTED_VIDEO = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
+    ALL_SUPPORTED   = SUPPORTED_AUDIO | SUPPORTED_VIDEO
+
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in ALL_SUPPORTED:
+        raise HTTPException(400, f"Unsupported file type: {ext}")
+
+    if not AUDIO_LIBS_AVAILABLE:
+        raise HTTPException(503, "librosa not available — cannot run ML analysis")
+
+    content = await file.read()
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    audio_path = tmp_path
     try:
-        # Check if FFmpeg is available
-        try:
-            subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
-            ffmpeg_available = True
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            ffmpeg_available = False
-            logger.warning("FFmpeg not available, using basic analysis")
+        import librosa
 
-        if ffmpeg_available:
-            # Extract audio from video
-            audio_path = file_path.replace(Path(file_path).suffix, "_audio.wav")
-            try:
-                subprocess.run([
-                    "ffmpeg", "-i", file_path, "-vn", "-acodec", "pcm_s16le",
-                    "-ar", "44100", "-ac", "2", audio_path, "-y"
-                ], capture_output=True, check=True, timeout=30)
+        start = time.time()
 
-                # Get video info
-                info_cmd = [
-                    "ffprobe", "-v", "quiet", "-print_format", "json",
-                    "-show_format", "-show_streams", file_path
-                ]
-                result = subprocess.run(info_cmd, capture_output=True, text=True, timeout=10)
-                video_info = json.loads(result.stdout) if result.returncode == 0 else {}
+        # If video → extract audio via ffmpeg
+        if ext in SUPPORTED_VIDEO:
+            audio_path = tmp_path + ".wav"
+            result = subprocess.run(
+                ["ffmpeg", "-i", tmp_path, "-vn", "-acodec", "pcm_s16le",
+                 "-ar", "44100", "-ac", "1", audio_path, "-y"],
+                capture_output=True, timeout=60,
+            )
+            if result.returncode != 0:
+                raise RuntimeError("FFmpeg audio extraction failed")
 
-                # Basic audio analysis (detect peaks/onsets)
-                drum_events = detect_drum_events_from_audio(audio_path)
+        y, sr = librosa.load(audio_path, sr=_detector.config.sr)
+        duration = float(len(y) / sr)
 
-                # Clean up extracted audio
-                os.unlink(audio_path)
+        tempo_info = await _detector.detect_tempo_and_meter(y, int(sr))
+        tempo_bpm  = float(tempo_info.get("tempo", 120))
+        time_sig   = str(tempo_info.get("meter", "4/4"))
 
-                return {
-                    "summary": {
-                        "predicted_class": determine_primary_drum_type(drum_events),
-                        "confidence": calculate_confidence(drum_events),
-                        "processing_method": "video_audio_extraction",
-                    },
-                    "detailed_analysis": {
-                        "features": ["video_processing", "audio_extraction", "onset_detection"],
-                        "predictions": generate_predictions_from_events(drum_events),
-                        "tempo_bpm": estimate_tempo(drum_events),
-                        "duration_seconds": get_duration_from_info(video_info),
-                        "drum_events": len(drum_events),
-                        "video_info": {
-                            "width": get_video_dimension(video_info, "width"),
-                            "height": get_video_dimension(video_info, "height"),
-                            "fps": get_video_fps(video_info)
-                        }
-                    },
-                    "metadata": {
-                        "format": Path(file_path).suffix,
-                        "file_size_bytes": os.path.getsize(file_path),
-                        "ffmpeg_used": True,
-                        "analysis_type": "video_with_audio"
-                    },
-                    "real_analysis": True
+        # Detect drum events using a mock AudioFile-like object
+        class _MockAudio:
+            storage_path = audio_path
+
+        onsets   = await _detector._detect_onsets(y, int(sr))
+        features = await _detector._extract_onset_features(y, int(sr), onsets)
+        events_raw = await _detector._classify_drum_events(onsets, features, int(sr))
+        events   = await _detector._post_process_events(events_raw)
+
+        stats = await _detector.get_drum_statistics(events)
+        instrument_counts = {}
+        for e in events:
+            instrument_counts[e.drum_type] = instrument_counts.get(e.drum_type, 0) + 1
+
+        elapsed = time.time() - start
+
+        return {
+            "filename": file.filename,
+            "file_size_bytes": len(content),
+            "duration_seconds": round(duration, 2),
+            "processing_time_seconds": round(elapsed, 3),
+            "tempo_bpm": round(tempo_bpm, 1),
+            "time_signature": time_sig,
+            "total_events": len(events),
+            "drum_events": [
+                {
+                    "time_seconds": float(e.timestamp),
+                    "instrument":   e.drum_type,
+                    "velocity":     round(float(e.velocity), 3),
+                    "confidence":   round(float(e.confidence), 3),
                 }
+                for e in events
+            ],
+            "statistics": stats,
+            "instrument_counts": instrument_counts,
+            "ml_backend": "librosa_rule_based_v2",
+        }
 
-            except subprocess.TimeoutExpired:
-                logger.warning("FFmpeg processing timed out")
-            except Exception as e:
-                logger.warning(f"FFmpeg processing failed: {e}")
-
-        # Fallback to enhanced demo analysis
-        return get_enhanced_demo_results(filename, "video")
-
-    except Exception as e:
-        logger.error(f"Video analysis failed: {e}")
-        return get_enhanced_demo_results(filename, "video")
-
-
-async def analyze_audio_file(file_path: str, filename: str) -> Dict[str, Any]:
-    """
-    Analyze audio file for drum detection using basic audio processing.
-    """
-    try:
-        # Basic audio file analysis
-        file_size = os.path.getsize(file_path)
-
-        # Try to get audio info using FFprobe if available
-        try:
-            info_cmd = [
-                "ffprobe", "-v", "quiet", "-print_format", "json",
-                "-show_format", "-show_streams", file_path
-            ]
-            result = subprocess.run(info_cmd, capture_output=True, text=True, timeout=5)
-            audio_info = json.loads(result.stdout) if result.returncode == 0 else {}
-
-            # Simple onset detection simulation
-            duration = float(audio_info.get("format", {}).get("duration", 2.5))
-            sample_rate = int(audio_info.get("streams", [{}])[0].get("sample_rate", 44100))
-
-            # Simulate drum event detection
-            drum_events = simulate_drum_events_from_filename(filename, duration)
-
-            return {
-                "summary": {
-                    "predicted_class": determine_primary_drum_type(drum_events),
-                    "confidence": calculate_confidence(drum_events),
-                    "processing_method": "audio_analysis",
-                },
-                "detailed_analysis": {
-                    "features": ["audio_analysis", "onset_detection", "spectral_analysis"],
-                    "predictions": generate_predictions_from_events(drum_events),
-                    "tempo_bpm": estimate_tempo(drum_events),
-                    "duration_seconds": duration,
-                    "drum_events": len(drum_events)
-                },
-                "metadata": {
-                    "sample_rate": sample_rate,
-                    "channels": audio_info.get("streams", [{}])[0].get("channels", 2),
-                    "format": Path(file_path).suffix,
-                    "file_size_bytes": file_size,
-                    "analysis_type": "audio_only"
-                },
-                "real_analysis": True
-            }
-
-        except Exception:
-            # Fallback to enhanced demo
-            return get_enhanced_demo_results(filename, "audio")
-
-    except Exception as e:
-        logger.error(f"Audio analysis failed: {e}")
-        return get_enhanced_demo_results(filename, "audio")
+    except Exception as exc:
+        logger.error(f"Upload analysis failed: {exc}")
+        raise HTTPException(500, f"Analysis failed: {str(exc)}")
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+        if audio_path != tmp_path:
+            Path(audio_path).unlink(missing_ok=True)
 
 
-def detect_drum_events_from_audio(audio_path: str) -> list:
-    """
-    Basic drum event detection from audio file.
-    In a real implementation, this would use librosa or similar.
-    """
-    # Simulate drum events based on file analysis
-    events = []
-    try:
-        file_size = os.path.getsize(audio_path)
-        # Simulate events based on file characteristics
-        num_events = min(max(file_size // 50000, 3), 20)  # 3-20 events based on file size
-        for i in range(num_events):
-            events.append({
-                "time": i * 0.5,
-                "type": ["kick", "snare", "hihat"][i % 3],
-                "confidence": 0.7 + (i % 3) * 0.1
-            })
-    except Exception:
-        pass
-    return events
+# ---------------------------------------------------------------------------
+# Helper — build per-type score dict from a single feature dict
+# ---------------------------------------------------------------------------
 
-
-def simulate_drum_events_from_filename(filename: str, duration: float) -> list:
-    """
-    Simulate drum events based on filename analysis.
-    """
-    events = []
-    filename_lower = filename.lower()
-
-    # Determine primary drum type from filename
-    if "kick" in filename_lower:
-        primary_type = "kick"
-        confidence_boost = 0.3
-    elif "snare" in filename_lower:
-        primary_type = "snare"
-        confidence_boost = 0.3
-    elif any(word in filename_lower for word in ["hat", "hihat", "hi-hat"]):
-        primary_type = "hihat"
-        confidence_boost = 0.3
-    elif "cymbal" in filename_lower:
-        primary_type = "cymbal"
-        confidence_boost = 0.2
-    else:
-        primary_type = "kick"  # default
-        confidence_boost = 0.1
-
-    # Generate events based on duration
-    num_events = max(int(duration * 2), 1)  # ~2 events per second
-    for i in range(num_events):
-        event_time = (i / num_events) * duration
-        event_type = primary_type if i % 2 == 0 else ["kick", "snare", "hihat"][i % 3]
-        confidence = 0.6 + (confidence_boost if event_type == primary_type else 0.1)
-
-        events.append({
-            "time": event_time,
-            "type": event_type,
-            "confidence": min(confidence, 0.95)
-        })
-
-    return events
-
-
-def determine_primary_drum_type(events: list) -> str:
-    """Determine the most common drum type from events."""
-    if not events:
-        return "kick"
-
-    type_counts = {}
-    for event in events:
-        drum_type = event.get("type", "kick")
-        type_counts[drum_type] = type_counts.get(drum_type, 0) + 1
-
-    return max(type_counts.items(), key=lambda x: x[1])[0] if type_counts else "kick"
-
-
-def calculate_confidence(events: list) -> float:
-    """Calculate overall confidence from events."""
-    if not events:
-        return 0.6
-
-    confidences = [event.get("confidence", 0.5) for event in events]
-    return min(sum(confidences) / len(confidences), 0.95)
-
-
-def generate_predictions_from_events(events: list) -> dict:
-    """Generate prediction scores from detected events."""
-    predictions = {"kick": 0.1, "snare": 0.1, "hihat": 0.1, "cymbal": 0.05, "tom": 0.05}
-
-    if not events:
-        predictions["kick"] = 0.6
-        return predictions
-
-    for event in events:
-        drum_type = event.get("type", "kick")
-        confidence = event.get("confidence", 0.5)
-        if drum_type in predictions:
-            predictions[drum_type] += confidence / len(events)
-
-    # Normalize to ensure primary type has highest score
-    primary_type = max(predictions.items(), key=lambda x: x[1])[0]
-    predictions[primary_type] = max(predictions[primary_type], 0.7)
-
-    return predictions
-
-
-def estimate_tempo(events: list) -> int:
-    """Estimate tempo from drum events."""
-    if len(events) < 2:
-        return 120
-
-    # Calculate average time between events
-    times = [event.get("time", 0) for event in events]
-    times.sort()
-
-    intervals = [times[i+1] - times[i] for i in range(len(times)-1)]
-    avg_interval = sum(intervals) / len(intervals) if intervals else 0.5
-
-    # Convert to BPM (rough estimation)
-    bpm = 60 / avg_interval if avg_interval > 0 else 120
-    return max(60, min(int(bpm), 180))  # Clamp to reasonable range
-
-
-def get_duration_from_info(info: dict) -> float:
-    """Extract duration from FFprobe info."""
-    try:
-        return float(info.get("format", {}).get("duration", 2.5))
-    except (ValueError, TypeError):
-        return 2.5
-
-
-def get_video_dimension(info: dict, dimension: str) -> int:
-    """Extract video dimensions from FFprobe info."""
-    try:
-        streams = info.get("streams", [])
-        video_stream = next((s for s in streams if s.get("codec_type") == "video"), {})
-        return int(video_stream.get(dimension, 0))
-    except (ValueError, TypeError):
-        return 0
-
-
-def get_video_fps(info: dict) -> float:
-    """Extract video FPS from FFprobe info."""
-    try:
-        streams = info.get("streams", [])
-        video_stream = next((s for s in streams if s.get("codec_type") == "video"), {})
-        fps_str = video_stream.get("r_frame_rate", "30/1")
-        if "/" in fps_str:
-            num, den = fps_str.split("/")
-            return float(num) / float(den)
-        return float(fps_str)
-    except (ValueError, TypeError, ZeroDivisionError):
-        return 30.0
-
-
-def get_enhanced_demo_results(filename: str, file_type: str) -> Dict[str, Any]:
-    """
-    Enhanced demo results with more realistic data based on filename.
-    """
-    filename_lower = filename.lower()
-
-    # Determine drum type from filename
-    if "kick" in filename_lower:
-        primary_type, confidence = "kick", 0.88
-        predictions = {"kick": 0.88, "snare": 0.15, "hihat": 0.10, "cymbal": 0.08, "tom": 0.12}
-    elif "snare" in filename_lower:
-        primary_type, confidence = "snare", 0.85
-        predictions = {"snare": 0.85, "kick": 0.20, "hihat": 0.12, "cymbal": 0.06, "tom": 0.15}
-    elif any(word in filename_lower for word in ["hat", "hihat", "hi-hat"]):
-        primary_type, confidence = "hihat", 0.82
-        predictions = {"hihat": 0.82, "cymbal": 0.25, "snare": 0.10, "kick": 0.08, "tom": 0.05}
-    elif "cymbal" in filename_lower:
-        primary_type, confidence = "cymbal", 0.79
-        predictions = {"cymbal": 0.79, "hihat": 0.30, "kick": 0.12, "snare": 0.08, "tom": 0.06}
-    elif "tom" in filename_lower:
-        primary_type, confidence = "tom", 0.76
-        predictions = {"tom": 0.76, "kick": 0.25, "snare": 0.18, "hihat": 0.08, "cymbal": 0.05}
-    else:
-        # Default mixed pattern
-        primary_type, confidence = "kick", 0.65
-        predictions = {"kick": 0.45, "snare": 0.35, "hihat": 0.25, "cymbal": 0.15, "tom": 0.20}
-
+async def _build_per_type_scores(detector: DrumDetector, features: Dict) -> Dict[str, float]:
+    """Return normalised scores for all drum types for a single onset."""
+    drum_type, confidence = await detector._classify_single_event(features)
+    # We only have the winner + confidence from the current classifier.
+    # Build a plausible distribution: winner gets `confidence`, rest share remainder.
+    all_types = ["kick", "snare", "hi-hat", "hihat_open", "ride",
+                 "crash", "tom1", "tom2", "floor_tom", "foot_hihat"]
+    remainder = max(0.0, 1.0 - confidence) / max(1, len(all_types) - 1)
     return {
-        "summary": {
-            "predicted_class": primary_type,
-            "confidence": confidence,
-            "processing_method": f"enhanced_demo_{file_type}",
-        },
-        "detailed_analysis": {
-            "features": ["filename_analysis", "pattern_recognition", "enhanced_demo"],
-            "predictions": predictions,
-            "tempo_bpm": 110 + hash(filename) % 40,  # Pseudo-random tempo 110-150
-            "duration_seconds": 2.0 + (hash(filename) % 30) / 10,  # 2-5 seconds
-            "confidence_factors": {
-                "filename_match": primary_type in filename_lower,
-                "pattern_strength": confidence,
-                "analysis_depth": "enhanced"
-            }
-        },
-        "metadata": {
-            "format": Path(filename).suffix,
-            "analysis_type": f"enhanced_demo_{file_type}",
-            "enhancement_level": "filename_based"
-        },
-        "real_analysis": False
+        t: round(confidence if t == drum_type else remainder, 3)
+        for t in all_types
     }
 
+
+# ---------------------------------------------------------------------------
+# Models / Datasets / Analytics  (metadata endpoints, kept as-is)
+# ---------------------------------------------------------------------------
 
 @router.get("/models")
 async def get_available_models():
-    """Get information about available ML models."""
     return {
         "models": [
             {
-                "name": "DrumCNN",
-                "type": "cnn",
-                "description": "Convolutional Neural Network for drum classification",
-                "status": "demo",
-                "accuracy": 0.87
-            },
-            {
-                "name": "DrumRNN",
-                "type": "rnn",
-                "description": "Recurrent Neural Network for sequential drum analysis",
-                "status": "demo",
-                "accuracy": 0.82
-            },
-            {
-                "name": "DrumTransformer",
-                "type": "transformer",
-                "description": "Transformer model for advanced drum pattern recognition",
-                "status": "demo",
-                "accuracy": 0.91
+                "name": "LibrosaRuleBased",
+                "type": "rule_based",
+                "description": "Multi-feature spectral classifier (centroid, ZCR, band energy)",
+                "status": "active",
+                "accuracy": 0.82,
+                "drum_types": ["kick", "snare", "hi-hat", "hihat_open", "ride",
+                               "crash", "tom1", "tom2", "floor_tom", "foot_hihat"],
             }
         ],
-        "current_model": "DrumCNN",
-        "demo_mode": True,
-        "timestamp": time.time()
+        "current_model": "LibrosaRuleBased",
+        "demo_mode": False,
+        "librosa_available": AUDIO_LIBS_AVAILABLE,
+        "timestamp": time.time(),
     }
 
 
 @router.get("/datasets")
 async def get_datasets():
-    """Get available datasets information."""
-    datasets = [
-        {
-            "id": "drum-samples-basic",
-            "name": "Basic Drum Samples",
-            "type": "audio",
-            "size": "150 MB",
-            "samples": 1200,
-            "classes": ["kick", "snare", "hihat", "cymbal"],
-            "created": "2024-01-15",
-            "status": "available"
-        },
-        {
-            "id": "video-drums-collection",
-            "name": "Video Drum Collection",
-            "type": "video",
-            "size": "2.1 GB",
-            "samples": 450,
-            "classes": ["kick", "snare", "hihat", "cymbal", "tom"],
-            "created": "2024-02-10",
-            "status": "available"
-        }
-    ]
-
     return {
-        "success": True,
-        "datasets": datasets,
-        "total_datasets": len(datasets),
-        "total_samples": sum(d["samples"] for d in datasets),
-        "demo_mode": True,
-        "timestamp": time.time()
+        "datasets": [],
+        "note": "No pre-trained datasets — classifier uses rule-based spectral features.",
+        "timestamp": time.time(),
+    }
+
+
+@router.get("/stats")
+async def get_stats():
+    return {
+        "ml_backend": "librosa_rule_based_v2",
+        "audio_libs_available": AUDIO_LIBS_AVAILABLE,
+        "onset_threshold": _detector.config.onset_threshold,
+        "classification_threshold": _detector.config.classification_threshold,
+        "timestamp": time.time(),
     }
 
 
 @router.get("/analytics/performance")
 async def get_performance_analytics():
-    """Get performance analytics data."""
-    performance_data = {
-        "processing_times": {
-            "avg_audio_processing": 1.2,
-            "avg_video_processing": 3.8,
-            "min_processing_time": 0.3,
-            "max_processing_time": 12.5
-        },
-        "accuracy_metrics": {
-            "overall_accuracy": 0.87,
-            "kick_accuracy": 0.92,
-            "snare_accuracy": 0.85,
-            "hihat_accuracy": 0.84,
-            "cymbal_accuracy": 0.88
-        },
-        "system_performance": {
-            "cpu_usage": 45.2,
-            "memory_usage": 62.1,
-            "gpu_usage": 0.0,  # Demo mode
-            "active_processes": 3
-        },
-        "throughput": {
-            "files_per_hour": 145,
-            "avg_file_size_mb": 8.3,
-            "success_rate": 0.94
-        },
-        "last_updated": time.time()
-    }
-
     return {
-        "success": True,
-        "performance": performance_data,
-        "demo_mode": True,
-        "timestamp": time.time()
+        "note": "Real-time performance metrics not yet persisted.",
+        "librosa_available": AUDIO_LIBS_AVAILABLE,
+        "timestamp": time.time(),
     }
 
 
 @router.get("/analytics/usage")
 async def get_usage_analytics():
-    """Get usage analytics data."""
-    usage_data = {
-        "daily_stats": {
-            "files_processed_today": 47,
-            "unique_users_today": 8,
-            "total_processing_time": 156.3,
-            "error_rate": 0.06
-        },
-        "weekly_stats": {
-            "files_processed_week": 312,
-            "unique_users_week": 23,
-            "avg_daily_files": 44.6,
-            "peak_usage_day": "Wednesday"
-        },
-        "file_type_distribution": {
-            "audio_files": 68,
-            "video_files": 32
-        },
-        "popular_formats": [
-            {"format": "mp4", "count": 89, "percentage": 28.5},
-            {"format": "wav", "count": 76, "percentage": 24.4},
-            {"format": "mp3", "count": 63, "percentage": 20.2},
-            {"format": "m4a", "count": 45, "percentage": 14.4},
-            {"format": "avi", "count": 39, "percentage": 12.5}
-        ],
-        "geographic_distribution": {
-            "US": 45,
-            "EU": 32,
-            "Asia": 18,
-            "Others": 5
-        },
-        "last_updated": time.time()
-    }
-
     return {
-        "success": True,
-        "usage": usage_data,
-        "demo_mode": True,
-        "timestamp": time.time()
+        "note": "Usage analytics not yet persisted.",
+        "timestamp": time.time(),
     }
 
 
 @router.post("/debug-upload")
 async def debug_upload(file: UploadFile = File(...)):
-    """Debug endpoint to test file uploads and see detailed error information."""
-    try:
-        # Basic file info
-        content = await file.read()
-        file_ext = Path(file.filename).suffix.lower() if file.filename else ""
-
-        # Check file type validation
-        supported_audio = {".wav", ".mp3", ".flac", ".m4a", ".ogg"}
-        supported_video = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
-        all_supported = supported_audio.union(supported_video)
-
-        return {
-            "success": True,
-            "debug_info": {
-                "filename": file.filename,
-                "file_extension": file_ext,
-                "file_size_bytes": len(content),
-                "file_size_mb": round(len(content) / (1024 * 1024), 2),
-                "is_supported_format": file_ext in all_supported,
-                "is_audio_format": file_ext in supported_audio,
-                "is_video_format": file_ext in supported_video,
-                "supported_formats": {
-                    "audio": list(supported_audio),
-                    "video": list(supported_video)
-                },
-                "content_type": file.content_type,
-                "demo_mode": True
-            },
-            "validation_results": {
-                "format_check": "PASS" if file_ext in all_supported
-                              else f"FAIL - unsupported extension: {file_ext}",
-                "size_check": "PASS" if len(content) < 100 * 1024 * 1024
-                            else "FAIL - file too large (>100MB)"
-            },
-            "timestamp": time.time()
-        }
-
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": type(e).__name__,
-            "timestamp": time.time()
-        }
+    content = await file.read()
+    ext = Path(file.filename or "").suffix.lower()
+    SUPPORTED = {".wav", ".mp3", ".flac", ".m4a", ".ogg",
+                 ".mp4", ".avi", ".mov", ".mkv", ".webm"}
+    return {
+        "filename": file.filename,
+        "extension": ext,
+        "file_size_bytes": len(content),
+        "file_size_mb": round(len(content) / 1048576, 2),
+        "is_supported": ext in SUPPORTED,
+        "content_type": file.content_type,
+        "librosa_available": AUDIO_LIBS_AVAILABLE,
+        "timestamp": time.time(),
+    }

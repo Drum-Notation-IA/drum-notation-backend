@@ -1,0 +1,86 @@
+DRUM NOTATION ML - ENDPOINTS PARA INTEGRACION BACKEND
+====================================================
+
+Base URL local:
+- http://127.0.0.1:8001
+
+Documentacion interactiva:
+- http://127.0.0.1:8001/docs
+- http://127.0.0.1:8001/redoc
+
+----------------------------------------------------
+1) ESTADO Y DISPONIBILIDAD
+----------------------------------------------------
+GET /
+- Descripcion: metadata basica del API.
+- Uso backend: verificar version y rutas principales.
+
+GET /health
+- Descripcion: healthcheck del servicio y estado de pipeline ML.
+- Uso backend: readiness/liveness y fallback a demo_mode si aplica.
+
+----------------------------------------------------
+2) ANALISIS ML (CORE)
+----------------------------------------------------
+POST /analyze
+- Descripcion: analiza 1 archivo (audio o video) y devuelve clase de bateria + confianza.
+- Content-Type: multipart/form-data
+- Campo esperado: file
+- Formatos soportados: .wav, .mp3, .flac, .m4a, .ogg, .mp4, .avi, .mov, .mkv, .webm
+- Uso backend: endpoint principal para analisis unitario.
+
+POST /batch-analyze
+- Descripcion: analiza multiples archivos en lote.
+- Content-Type: multipart/form-data
+- Campo esperado: files (lista)
+- Limite actual: hasta 10 archivos por request.
+- Uso backend: procesamiento batch para colas o jobs.
+
+----------------------------------------------------
+3) MODELOS Y METRICAS
+----------------------------------------------------
+GET /models
+- Descripcion: lista modelos disponibles y modelo actual.
+- Uso backend: seleccionar estrategia por tipo de modelo o mostrar capacidades.
+
+GET /stats
+- Descripcion: estadisticas internas del pipeline/servidor.
+- Uso backend: observabilidad operativa y telemetria.
+
+GET /datasets
+- Descripcion: datasets disponibles (mock/metadata en estado actual).
+- Uso backend: catalogo de data para UI interna o auditoria.
+
+GET /analytics/performance
+- Descripcion: metricas de performance (tiempos, accuracy, throughput, sistema).
+- Uso backend: dashboards y alertas de degradacion.
+
+GET /analytics/usage
+- Descripcion: metricas de uso (volumen, formatos, distribucion).
+- Uso backend: reportes de adopcion y dimensionamiento.
+
+----------------------------------------------------
+4) DEBUG Y SOPORTE TECNICO
+----------------------------------------------------
+POST /debug-upload
+- Descripcion: valida archivo y retorna diagnostico detallado.
+- Content-Type: multipart/form-data
+- Campo esperado: file
+- Uso backend: troubleshooting de errores de formato, FFmpeg y limites de tamano.
+
+----------------------------------------------------
+NOTAS DE INTEGRACION
+----------------------------------------------------
+- Si pipeline ML no esta disponible, varios endpoints responden en demo_mode.
+- Para video, el entorno requiere FFmpeg instalado.
+- Codigos esperados comunes:
+  - 200/201: OK
+  - 400: formato/entrada invalida
+  - 413: archivo demasiado grande
+  - 415: formato no soportado/corrupto
+  - 500: error interno de procesamiento
+
+Fuente verificada:
+- serving/api.py
+
+Actualizado: 2026-05-02

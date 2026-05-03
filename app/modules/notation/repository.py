@@ -57,6 +57,19 @@ class DrumNotationRepository:
         result = await db.execute(query)
         return result.scalar_one_or_none()
 
+    async def get_by_id(
+        self, db: AsyncSession, notation_id: UUID
+    ) -> Optional[DrumNotation]:
+        """Get notation by its primary key (no relationship loading)"""
+        query = select(DrumNotation).where(
+            and_(
+                DrumNotation.id == notation_id,
+                DrumNotation.deleted_at.is_(None),
+            )
+        )
+        result = await db.execute(query)
+        return result.scalar_one_or_none()
+
     async def get_with_enrichments(
         self, db: AsyncSession, notation_id: UUID
     ) -> Optional[DrumNotation]:

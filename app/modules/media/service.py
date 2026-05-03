@@ -1,4 +1,6 @@
 import math
+import asyncio
+import os
 from pathlib import Path
 from typing import Optional, Tuple
 from uuid import UUID
@@ -56,14 +58,18 @@ class VideoService:
                 detail="Video file size exceeds maximum allowed size (500MB)",
             )
 
-        # Check if filename already exists for this user
-        if await self.video_repository.filename_exists_for_user(
-            db, upload_file.filename, user_id
+        # If the filename already exists for this user, append a counter suffix
+        # so uploads of the same file always succeed rather than returning 400.
+        original_filename = upload_file.filename
+        candidate_filename = original_filename
+        counter = 1
+        while await self.video_repository.filename_exists_for_user(
+            db, candidate_filename, user_id
         ):
-            raise HTTPException(
-                status_code=400,
-                detail=f"A video with filename '{upload_file.filename}' already exists",
-            )
+            stem, ext = os.path.splitext(original_filename)
+            candidate_filename = f"{stem}_{counter}{ext}"
+            counter += 1
+        upload_file.filename = candidate_filename
 
         # Check user storage quota
         user_total_size = await self.video_repository.get_user_storage_size(db, user_id)
@@ -392,9 +398,11 @@ class VideoService:
         self, db: AsyncSession, video_id: UUID, user_id: UUID
     ) -> dict:
         """
-        Initiate audio extraction from video (placeholder for future implementation)
-        This would typically create a background job for processing
+        Extract audio from video using ffmpeg and create an AudioFile record.
         """
+        import os
+        import asyncio
+        import subprocess
 
         # Check if video exists and user owns it
         video = await self.video_repository.get_by_id(db, video_id)
@@ -406,22 +414,93 @@ class VideoService:
                 status_code=403, detail="Not authorized to process this video"
             )
 
-        # Check if audio already exists
+        # Return early if audio already exists
         existing_audio = await self.audio_repository.get_by_video_id(db, video_id)
         if existing_audio:
+            af = existing_audio[0]
+            return {
+                "message": "Audio already extracted",
+                "video_id": str(video_id),
+                "audio_id": str(af.id),
+                "status": "completed",
+            }
+
+        # Resolve video file path
+        video_path = str(video.storage_path)
+        if not os.path.isabs(video_path):
+            from pathlib import Path
+            video_path = str(Path(__file__).resolve().parents[3] / video_path)
+
+        if not os.path.exists(video_path):
+            raise HTTPException(status_code=404, detail=f"Video file not found at {video_path}")
+
+        # Output path: uploads/audio/<video_id>.wav
+        from pathlib import Path
+        audio_dir = Path(__file__).resolve().parents[3] / "uploads" / "audio"
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        audio_path = audio_dir / f"{video_id}.wav"
+
+        # Extract audio with ffmpeg (16kHz mono WAV for ML pipeline)
+        # Run in a thread pool so the async event loop is not blocked.
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-vn",
+            "-acodec", "pcm_s16le",
+            "-ar", "16000",
+            "-ac", "1",
+            str(audio_path),
+        ]
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=120),
+        )
+        if result.returncode != 0:
             raise HTTPException(
-                status_code=400,
-                detail="Audio has already been extracted from this video",
+                status_code=500,
+                detail=f"ffmpeg audio extraction failed: {result.stderr[-300:]}"
             )
 
-        # TODO: Create a processing job for audio extraction
-        # This would be implemented when the jobs module is ready
+        # Probe duration and sample rate (also non-blocking)
+        try:
+            probe_cmd = [
+                "ffprobe", "-v", "quiet", "-print_format", "json",
+                "-show_streams", "-select_streams", "a",
+                str(audio_path),
+            ]
+            probe = await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(probe_cmd, capture_output=True, text=True, timeout=30),
+            )
+            import json as _json
+            probe_data = _json.loads(probe.stdout) if probe.returncode == 0 else {}
+            streams = probe_data.get("streams", [{}])
+            sample_rate = int(streams[0].get("sample_rate", 16000)) if streams else 16000
+            duration = float(streams[0].get("duration", 0)) if streams else 0.0
+        except Exception:
+            sample_rate = 16000
+            duration = 0.0
+
+        # Persist relative path
+        rel_audio_path = f"uploads/audio/{video_id}.wav"
+        audio_file = await self.audio_repository.create(
+            db=db,
+            video_id=video_id,
+            sample_rate=sample_rate,
+            channels=1,
+            storage_path=rel_audio_path,
+            duration_seconds=duration or None,
+        )
+        await db.commit()
 
         return {
-            "message": "Audio extraction initiated",
+            "message": "Audio extracted successfully",
             "video_id": str(video_id),
-            "status": "pending",
-            "note": "Audio extraction will be implemented with the jobs module",
+            "audio_id": str(audio_file.id),
+            "status": "completed",
+            "duration_seconds": duration,
+            "sample_rate": sample_rate,
         }
 
     async def get_video_processing_status(

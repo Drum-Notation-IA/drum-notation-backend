@@ -37,15 +37,31 @@ DRUM_MAP: Dict[str, Dict] = {
 }
 
 DRUM_ALIASES: Dict[str, str] = {
+    # hi-hat variants
     "hi_hat": "hi-hat", "hihat": "hi-hat", "hi hat": "hi-hat",
-    "bass drum": "kick", "bd": "kick", "sd": "snare",
-    "hh": "hi-hat", "hhc": "hihat_closed", "hho": "hihat_open",
-    "cc": "crash", "rc": "ride", "t1": "tom1", "t2": "tom2",
-    "ft": "floor_tom", "fhh": "foot_hihat",
+    "hh": "hi-hat", "hhc": "hihat_closed",
+    # open hi-hat
+    "hho": "hihat_open", "open_hihat": "hihat_open", "open hihat": "hihat_open",
+    "open hi-hat": "hihat_open", "hi-hat open": "hihat_open",
+    # kick
+    "bass drum": "kick", "bd": "kick", "bass_drum": "kick",
+    # snare
+    "sd": "snare",
+    # cymbals
+    "cc": "crash", "rc": "ride",
+    # toms — detector internal names → DRUM_MAP keys
+    "tom_high": "tom1",   "t1": "tom1",
+    "tom_mid":  "tom2",   "t2": "tom2",
+    "tom_low":  "floor_tom", "ft": "floor_tom", "floortom": "floor_tom",
+    # foot hi-hat
+    "fhh": "foot_hihat", "foot_hi_hat": "foot_hihat", "foot hi-hat": "foot_hihat",
+    # china / crash2
+    "ch": "china",
 }
 
 STAFF_LINES = 5
 LS = 7.0   # points between adjacent staff lines
+SUBDIVISION = 4   # 16th-note grid (4 sub-divisions per beat)
 
 
 def _norm(raw: str) -> str:
@@ -194,23 +210,40 @@ def _draw_beam(c, x1: float, x2: float, y1: float, y2: float, direction: str):
         c.line(x1 - off, y1 - sl, x2 - off, y2 - sl)
 
 
+def _draw_ghost_parens(c, x: float, y: float, sz: float = 4.0):
+    """Draw ( ) around a note head to indicate a ghost note."""
+    c.setFont("Helvetica", sz * 2.6)
+    c.setFillColor(colors.black)
+    c.drawCentredString(x - sz * 1.8, y - sz * 0.9, "(")
+    c.drawCentredString(x + sz * 1.8, y - sz * 0.9, ")")
+
+
 # ---------------------------------------------------------------------------
-# Parse notation_json -> [measure][beat_index][list of drum keys]
+# Parse notation_json -> [measure][slot_index][list of entries]
+# Each entry is either "drum_key" or "ghost:drum_key".
+# Slots: beats_per_measure * SUBDIVISION (e.g. 4*4=16 for 4/4 16th-note grid)
 # ---------------------------------------------------------------------------
 
-def _parse_measures(notation_json: Dict, bpm: int) -> List[List[List[str]]]:
+def _parse_measures(notation_json: Dict, beats_per_measure: int) -> List[List[List[str]]]:
+    total_slots = beats_per_measure * SUBDIVISION
     result = []
     for measure in notation_json.get("measures", []):
-        beats: List[List[str]] = [[] for _ in range(bpm)]
+        slots: List[List[str]] = [[] for _ in range(total_slots)]
         for beat in measure.get("beats", []):
-            bi = max(0, min(bpm - 1, int(beat.get("beat_number", 1)) - 1))
+            # beat_number can be fractional: 1.0, 1.25, 1.5 … for 16th notes
+            beat_num = float(beat.get("beat_number", 1))
+            slot_idx = int(round((beat_num - 1.0) * SUBDIVISION))
+            slot_idx = max(0, min(total_slots - 1, slot_idx))
             for note in beat.get("notes", []):
                 raw = str(note.get("drum_type", "")).strip().lower()
-                if raw:
-                    k = _norm(raw)
-                    if k not in beats[bi]:
-                        beats[bi].append(k)
-        result.append(beats)
+                if not raw:
+                    continue
+                k = _norm(raw)
+                is_ghost = bool(note.get("ghost_note", False))
+                entry = ("ghost:" + k) if is_ghost else k
+                if entry not in slots[slot_idx]:
+                    slots[slot_idx].append(entry)
+        result.append(slots)
     return result
 
 
@@ -242,19 +275,20 @@ def generate_notation_pdf(
 
     measures = _parse_measures(notation_json, bpm)
 
-    # Demo fallback: standard rock beat
+    # Demo fallback: standard rock beat on a 16-slot grid
     if not measures:
-        measures = []
-        for _ in range(4):
-            beat_list = []
-            for b in range(bpm):
-                notes = ["hi-hat"]
-                if b == 0 or b == 2:
-                    notes.append("kick")
-                if b == 1 or b == 3:
-                    notes.append("snare")
-                beat_list.append(notes)
-            measures.append(beat_list)
+        total_slots = bpm * SUBDIVISION
+        demo_measure: List[List[str]] = [[] for _ in range(total_slots)]
+        for b in range(bpm):
+            slot = b * SUBDIVISION
+            demo_measure[slot] = ["hi-hat"]
+            if b == 0 or b == 2:
+                demo_measure[slot].append("kick")
+            if b == 1 or b == 3:
+                demo_measure[slot].append("snare")
+            # 8th-note hi-hats
+            demo_measure[slot + 2] = ["hi-hat"]
+        measures = [list(demo_measure) for _ in range(4)]
 
     # ---- Layout ----
     ML, MR, MT, MB = 1.5 * cm, 1.5 * cm, 1.5 * cm, 1.5 * cm
@@ -276,15 +310,19 @@ def generate_notation_pdf(
                  f"·  Measures: {len(measures)}  ·  Generated: {date_str}")
 
     content_top = top - 40
-    MAX_PER_ROW = 8
-    mpr     = min(MAX_PER_ROW, len(measures))
-    use_w   = page_w - ML - MR
-    PFX     = 38.0   # prefix width: clef + time sig
-    beat_w  = max(14.0, (use_w - PFX) / (mpr * bpm))
-    measure_w = beat_w * bpm
+    # 4 measures per row gives enough width for the 16-slot grid
+    MAX_PER_ROW = 4
+    mpr       = min(MAX_PER_ROW, max(1, len(measures)))
+    use_w     = page_w - ML - MR
+    PFX       = 38.0   # prefix width: clef + time sig
+    total_slots = bpm * SUBDIVISION   # e.g. 16 for 4/4 at 16th resolution
+    slot_w    = max(8.0, (use_w - PFX) / (mpr * total_slots))
+    measure_w = slot_w * total_slots
 
     mi  = 0   # measure index
     row = 0
+
+    page_num = 1   # current page number
 
     while mi < len(measures):
         y_bot = content_top - row * row_h - above
@@ -292,8 +330,20 @@ def generate_notation_pdf(
         # New page if out of space
         if y_bot - below < MB + 30:
             c.showPage()
+            page_num += 1
             row   = 0
-            y_bot = page_h - MT - above
+            # Re-draw page header on new page (compact)
+            top_new = page_h - MT
+            c.setFont("Helvetica", 8)
+            c.setFillColor(colors.HexColor("#444444"))
+            c.drawString(ML, top_new - 14,
+                         f"{doc_title}  ·  {tempo} BPM  ·  {time_signature}  "
+                         f"·  p.{page_num}/{((len(measures) - 1) // (mpr * 3) + 1)}")
+            content_top_page = top_new - 24
+            y_bot = content_top_page - above
+        else:
+            content_top_page = content_top
+            y_bot = content_top_page - row * row_h - above
 
         n  = min(mpr, len(measures) - mi)
         sw = PFX + measure_w * n
@@ -324,75 +374,95 @@ def generate_notation_pdf(
                                 y_bot + staff_h + above * 0.88,
                                 str(mabs + 1))
 
-            beats_in   = measures[mabs]
-            up_beats: List[int]   = []
-            down_beats: List[int] = []
+            slots_in   = measures[mabs]   # list of total_slots lists
+            up_slots:   List[int] = []
+            down_slots: List[int] = []
 
-            for bi, notes in enumerate(beats_in):
-                bx = measure_x + bi * beat_w + beat_w * 0.5
+            for si, entries in enumerate(slots_in):
+                bx = measure_x + si * slot_w + slot_w * 0.5
 
-                if any(_info(k)["stem"] == "up"   for k in notes):
-                    up_beats.append(bi)
-                if any(_info(k)["stem"] == "down" for k in notes):
-                    down_beats.append(bi)
+                # Subdivision grid ticks — three levels of visual weight
+                beat_idx = si // SUBDIVISION        # which beat (0-based)
+                sub_idx  = si % SUBDIVISION          # position within beat
 
-                # Light subdivision tick on the middle line
-                c.setStrokeColor(colors.HexColor("#CCCCCC"))
-                c.setLineWidth(0.4)
                 tick_y = _sy(y_bot, 2.0)
-                c.line(bx, tick_y - 2, bx, tick_y + 2)
+                if sub_idx == 0:
+                    # Beat boundary — solid dark tick + beat label
+                    c.setStrokeColor(colors.HexColor("#888888"))
+                    c.setLineWidth(0.6)
+                    c.line(bx, tick_y - 3, bx, tick_y + 3)
+                    c.setFont("Helvetica", 5)
+                    c.setFillColor(colors.HexColor("#888888"))
+                    c.drawCentredString(bx, y_bot - LS * 0.9, str(beat_idx + 1))
+                elif sub_idx == 2:
+                    # 8th-note boundary — medium grey tick
+                    c.setStrokeColor(colors.HexColor("#BBBBBB"))
+                    c.setLineWidth(0.5)
+                    c.line(bx, tick_y - 2, bx, tick_y + 2)
+                else:
+                    # 16th-note tick — lightest
+                    c.setStrokeColor(colors.HexColor("#DDDDDD"))
+                    c.setLineWidth(0.4)
+                    c.line(bx, tick_y - 1.5, bx, tick_y + 1.5)
 
-                # Beat number label
-                c.setFont("Helvetica", 5)
-                c.setFillColor(colors.HexColor("#AAAAAA"))
-                c.drawCentredString(bx, y_bot - LS * 0.9, str(bi + 1))
+                if entries:
+                    # Track which slots have up/down stems for beaming
+                    dk_bare = [e[6:] if e.startswith("ghost:") else e for e in entries]
+                    if any(_info(k)["stem"] == "up"   for k in dk_bare):
+                        up_slots.append(si)
+                    if any(_info(k)["stem"] == "down" for k in dk_bare):
+                        down_slots.append(si)
 
-                for dk in notes:
-                    inf    = _info(dk)
-                    sp     = inf["staff_pos"]
-                    hd     = inf["head"]
-                    st_dir = inf["stem"]
-                    ny     = _sy(y_bot, sp)
+                    for entry in entries:
+                        is_ghost = entry.startswith("ghost:")
+                        dk   = entry[6:] if is_ghost else entry
+                        inf    = _info(dk)
+                        sp     = inf["staff_pos"]
+                        hd     = inf["head"]
+                        st_dir = inf["stem"]
+                        ny     = _sy(y_bot, sp)
 
-                    if sp < 0 or sp > 4:
-                        _draw_ledger(c, bx, y_bot, sp)
+                        if sp < 0 or sp > 4:
+                            _draw_ledger(c, bx, y_bot, sp)
 
-                    c.setFillColor(colors.black)
-                    c.setStrokeColor(colors.black)
-                    _draw_stem(c, bx, ny, st_dir)
-                    _draw_head(c, bx, ny, hd)
+                        c.setFillColor(colors.black)
+                        c.setStrokeColor(colors.black)
+                        _draw_stem(c, bx, ny, st_dir)
+                        if is_ghost:
+                            _draw_ghost_parens(c, bx, ny)
+                        _draw_head(c, bx, ny, hd)
 
-            # Beam consecutive stem-up notes (hi-hats, cymbals)
-            if len(up_beats) > 1:
-                bxs = [measure_x + bi * beat_w + beat_w * 0.5 for bi in up_beats]
+            # Beam consecutive stem-up slots (hi-hats, cymbals, snare)
+            if len(up_slots) > 1:
+                bxs = [measure_x + si * slot_w + slot_w * 0.5 for si in up_slots]
 
-                def _up_y(bi: int) -> float:
+                def _up_y(si: int) -> float:
+                    dk_bare = [e[6:] if e.startswith("ghost:") else e for e in slots_in[si]]
                     sp = max(
-                        (_info(k)["staff_pos"] for k in beats_in[bi]
-                         if _info(k)["stem"] == "up"),
+                        (_info(k)["staff_pos"] for k in dk_bare if _info(k)["stem"] == "up"),
                         default=3.5,
                     )
                     return _sy(y_bot, sp)
 
                 for i in range(len(bxs) - 1):
                     _draw_beam(c, bxs[i], bxs[i + 1],
-                               _up_y(up_beats[i]), _up_y(up_beats[i + 1]), "up")
+                               _up_y(up_slots[i]), _up_y(up_slots[i + 1]), "up")
 
-            # Beam consecutive stem-down notes (kick, floor tom)
-            if len(down_beats) > 1:
-                bxs = [measure_x + bi * beat_w + beat_w * 0.5 for bi in down_beats]
+            # Beam consecutive stem-down slots (kick, floor tom)
+            if len(down_slots) > 1:
+                bxs = [measure_x + si * slot_w + slot_w * 0.5 for si in down_slots]
 
-                def _dn_y(bi: int) -> float:
+                def _dn_y(si: int) -> float:
+                    dk_bare = [e[6:] if e.startswith("ghost:") else e for e in slots_in[si]]
                     sp = min(
-                        (_info(k)["staff_pos"] for k in beats_in[bi]
-                         if _info(k)["stem"] == "down"),
+                        (_info(k)["staff_pos"] for k in dk_bare if _info(k)["stem"] == "down"),
                         default=-0.5,
                     )
                     return _sy(y_bot, sp)
 
                 for i in range(len(bxs) - 1):
                     _draw_beam(c, bxs[i], bxs[i + 1],
-                               _dn_y(down_beats[i]), _dn_y(down_beats[i + 1]), "down")
+                               _dn_y(down_slots[i]), _dn_y(down_slots[i + 1]), "down")
 
             # Closing barline
             is_last = (ml == n - 1) and (mabs == len(measures) - 1)
@@ -412,7 +482,7 @@ def generate_notation_pdf(
         ("filled oval, stem up",   "Snare / Toms"),
         ("X head, stem up",        "Hi-Hat / Ride / Crash"),
         ("circle + X",             "Open Hi-Hat"),
-        ("diamond",                "Ride Bell"),
+        ("( note )",               "Ghost Note"),
     ]
     ex = ML
     for sym, desc in items:

@@ -70,14 +70,8 @@ class NotationService:
         Generate complete musical notation from drum detection results
         """
         try:
-            # Validate input
-            if not drum_events:
-                raise HTTPException(
-                    status_code=400, detail="No drum events provided for notation"
-                )
-
-            # Calculate basic metrics
-            estimated_tempo = tempo_bpm or self._estimate_tempo_from_events(drum_events)
+            # Calculate basic metrics; allow 0 events (generates empty/minimal notation)
+            estimated_tempo = tempo_bpm or (self._estimate_tempo_from_events(drum_events) if drum_events else 120.0)
 
             # Generate the complete notation structure
             notation_json = await self._generate_complete_notation(
@@ -295,54 +289,71 @@ class NotationService:
         seconds_per_beat: float,
     ) -> List[Dict[str, Any]]:
         """
-        Organize events into beats within a measure
+        Organize events into a 16th-note grid within a measure.
+        Each event is quantized to the nearest 16th-note slot and
+        assigned a fractional beat_number (e.g. 1.0, 1.25, 1.5, 1.75, 2.0 …).
         """
-        beats = []
+        SUBDIVISION = 4  # 16th notes per beat
+        total_slots = beats_per_measure * SUBDIVISION
+        slot_duration = seconds_per_beat / SUBDIVISION
 
-        for beat_num in range(1, beats_per_measure + 1):
-            beat_start = measure_start_time + (beat_num - 1) * seconds_per_beat
-            beat_end = beat_start + seconds_per_beat
+        # Map slot_index → list of notes
+        slots: Dict[int, List[Dict[str, Any]]] = {}
 
-            # Get events in this beat
-            beat_events = [
-                event
-                for event in events
-                if beat_start <= event.get("time_seconds", 0) < beat_end
-            ]
+        for event in events:
+            time_seconds = float(event.get("time_seconds", 0))
+            instrument = str(event.get("instrument", "unknown"))
+            velocity = float(event.get("velocity", 0.5))
 
-            # Convert events to notes
-            notes = []
-            for event in beat_events:
-                instrument = event.get("instrument", "unknown")
-                velocity = event.get("velocity", 0.5)
+            # Quantize to nearest 16th-note slot
+            time_in_measure = time_seconds - measure_start_time
+            slot_index = int(round(time_in_measure / slot_duration))
+            slot_index = max(0, min(total_slots - 1, slot_index))
 
-                drum_mapping = self.default_drum_mapping.get(
-                    instrument,
-                    {"staff_position": "C5", "note_head": "normal", "line": 3},
-                )
+            # Fractional beat position: 1.0, 1.25, 1.5 … beats_per_measure.75
+            beat_number = 1.0 + slot_index / SUBDIVISION
 
-                note = {
-                    "drum_type": instrument,
-                    "staff_position": drum_mapping["staff_position"],
-                    "note_duration": "quarter",  # Default duration
-                    "note_head_type": drum_mapping["note_head"],
-                    "velocity": velocity,
-                    "accent": "accent" if velocity > 0.8 else None,
-                    "ghost_note": velocity < 0.3,
-                    "confidence_score": event.get("confidence", None),
-                    "timestamp_seconds": event.get("time_seconds", 0),
-                }
-                notes.append(note)
+            # Note duration based on subdivision level
+            slot_in_beat = slot_index % SUBDIVISION
+            if slot_in_beat == 0:
+                note_duration = "quarter"
+            elif slot_in_beat % 2 == 0:
+                note_duration = "eighth"
+            else:
+                note_duration = "sixteenth"
 
-            beat_data = {
-                "beat_number": beat_num,
-                "start_time_seconds": beat_start,
-                "end_time_seconds": beat_end,
-                "notes": notes,
-                "note_count": len(notes),
+            drum_mapping = self.default_drum_mapping.get(
+                instrument,
+                {"staff_position": "C5", "note_head": "normal", "line": 3},
+            )
+
+            note = {
+                "drum_type": instrument,
+                "staff_position": drum_mapping["staff_position"],
+                "note_duration": note_duration,
+                "note_head_type": drum_mapping["note_head"],
+                "velocity": velocity,
+                "accent": velocity > 0.8,
+                "ghost_note": velocity < 0.3,
+                "confidence_score": event.get("confidence"),
+                "timestamp_seconds": time_seconds,
+                "beat_number": round(beat_number, 4),
             }
 
-            beats.append(beat_data)
+            slots.setdefault(slot_index, []).append(note)
+
+        # Build beats list — one entry per occupied 16th-note slot
+        beats = []
+        for slot_idx in range(total_slots):
+            notes = slots.get(slot_idx)
+            if notes:
+                beat_number = round(1.0 + slot_idx / SUBDIVISION, 4)
+                beats.append({
+                    "beat_number": beat_number,
+                    "slot_index": slot_idx,
+                    "notes": notes,
+                    "note_count": len(notes),
+                })
 
         return beats
 
@@ -559,29 +570,47 @@ class NotationService:
 
     # Helper methods for tempo and musical analysis
     def _estimate_tempo_from_events(self, drum_events: List[Dict[str, Any]]) -> float:
-        """Estimate tempo from drum events using inter-onset intervals"""
+        """
+        Estimate tempo from drum events using kick/snare IOI (beat-level),
+        not hi-hat/cymbal IOI which would give 4× the true tempo.
+        Falls back to global average if no kick/snare events are present.
+        """
         if len(drum_events) < 2:
-            return 120.0  # Default tempo
+            return 120.0
 
-        # Get timestamps and sort
-        timestamps = sorted([event.get("time_seconds", 0) for event in drum_events])
+        # Prefer beat-indicator instruments for IOI calculation
+        BEAT_INSTRUMENTS = {"kick", "snare", "bass_drum", "floor_tom"}
+        beat_times = sorted(
+            e.get("time_seconds", 0)
+            for e in drum_events
+            if e.get("instrument", "").lower() in BEAT_INSTRUMENTS
+        )
 
-        # Calculate inter-onset intervals
-        intervals = []
-        for i in range(1, len(timestamps)):
-            interval = timestamps[i] - timestamps[i - 1]
-            if 0.1 < interval < 2.0:  # Filter reasonable intervals
-                intervals.append(interval)
+        if len(beat_times) < 2:
+            # Fall back to all onsets but filter to intervals that look like beats
+            all_times = sorted(e.get("time_seconds", 0) for e in drum_events)
+            intervals = [
+                all_times[i + 1] - all_times[i]
+                for i in range(len(all_times) - 1)
+                if 0.2 < (all_times[i + 1] - all_times[i]) < 2.0  # 30–300 BPM
+            ]
+        else:
+            intervals = [
+                beat_times[i + 1] - beat_times[i]
+                for i in range(len(beat_times) - 1)
+                if 0.2 < (beat_times[i + 1] - beat_times[i]) < 2.0
+            ]
 
         if not intervals:
             return 120.0
 
-        # Find most common interval (tempo)
-        avg_interval = sum(intervals) / len(intervals)
-        estimated_bpm = 60.0 / avg_interval
+        # Use median to be robust against occasional double-strokes or gaps
+        intervals_sorted = sorted(intervals)
+        mid = len(intervals_sorted) // 2
+        median_interval = intervals_sorted[mid]
 
-        # Clamp to reasonable range
-        return max(60.0, min(200.0, estimated_bpm))
+        estimated_bpm = 60.0 / median_interval
+        return max(60.0, min(220.0, estimated_bpm))
 
     def _get_beats_per_measure(self, time_signature: str) -> int:
         """Get beats per measure from time signature"""

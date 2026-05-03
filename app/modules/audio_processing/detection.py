@@ -68,18 +68,22 @@ class DrumDetectionConfig:
         self.onset_min_distance = 0.05  # Minimum time between onsets (seconds)
 
         # Frequency band definitions for drum classification
+        # Kept broad to capture body energy for each type; the multi-feature
+        # scorer in _classify_single_event does the real discrimination.
         self.frequency_bands = {
-            "kick": (20, 120),  # Kick drum frequency range
-            "snare": (150, 300),  # Snare drum fundamental
-            "hihat": (8000, 16000),  # Hi-hat frequency range
-            "crash": (6000, 20000),  # Crash cymbal
-            "tom_low": (80, 200),  # Low tom
-            "tom_mid": (200, 400),  # Mid tom
-            "tom_high": (400, 800),  # High tom
+            "kick":     (20,   130),   # Kick drum body
+            "snare":    (150,  300),   # Snare fundamental
+            "hihat":    (7000, 16000), # Closed hi-hat / cymbal shimmer
+            "crash":    (4000, 20000), # Crash / ride body
+            "tom_low":  (80,   220),   # Floor tom / low tom body
+            "tom_mid":  (200,  450),   # Mid tom body
+            "tom_high": (350,  900),   # High tom body
         }
 
-        # Classification thresholds
-        self.classification_threshold = 0.6
+        # Lower threshold so toms and ride are not discarded.
+        # The multi-feature scorer already picks the best candidate,
+        # so we only drop events with very weak / ambiguous signal.
+        self.classification_threshold = 0.25
         self.velocity_threshold = 0.1
 
         # Spectral features for classification
@@ -431,59 +435,170 @@ class DrumDetector:
 
     async def _classify_single_event(self, features: Dict) -> Tuple[str, float]:
         """
-        Classify a single drum event based on its features
+        Classify a single drum event using multi-feature scoring.
 
-        Args:
-            features: Feature dictionary for the event
-
-        Returns:
-            Tuple of (drum_type, confidence)
+        Outputs names that match DRUM_MAP keys directly:
+        kick, snare, hi-hat, hihat_open, ride, crash, tom1, tom2, floor_tom, foot_hihat
         """
-        # Initialize scores for each drum type
-        scores = {}
+        # --- Extract scalar features ---
+        centroid = float(features.get("spectral_centroid", 1000))
+        rolloff  = float(features.get("spectral_rolloff",  2000))
+        zcr      = float(features.get("zero_crossing_rate", 0.1))
+        rms      = float(features.get("rms_energy", 0.1))
 
-        # Rule-based classification using frequency band energies
-        for drum_type in self.config.frequency_bands.keys():
-            energy_key = f"{drum_type}_energy"
-            if energy_key in features:
-                scores[drum_type] = features[energy_key]
-            else:
-                scores[drum_type] = 0.0
+        e_kick      = float(features.get("kick_energy",     0))
+        e_snare     = float(features.get("snare_energy",    0))
+        e_hihat     = float(features.get("hihat_energy",    0))
+        e_crash     = float(features.get("crash_energy",    0))
+        e_tom_low   = float(features.get("tom_low_energy",  0))
+        e_tom_mid   = float(features.get("tom_mid_energy",  0))
+        e_tom_high  = float(features.get("tom_high_energy", 0))
 
-        # Additional rules based on spectral features
-        spectral_centroid = features.get("spectral_centroid", 0)
-        spectral_rolloff = features.get("spectral_rolloff", 0)
-        zero_crossing_rate = features.get("zero_crossing_rate", 0)
+        scores: Dict[str, float] = {}
 
-        # Kick drum: low frequency, high energy
-        if spectral_centroid < 200:
-            scores["kick"] *= 1.5
+        # --- KICK: sub-bass body, low centroid, low ZCR ---
+        s = 0.0
+        if centroid < 200:      s += 4.0
+        elif centroid < 350:    s += 2.0
+        if zcr < 0.06:          s += 3.0
+        elif zcr < 0.10:        s += 1.5
+        s += e_kick * 6.0
+        # Penalise if high-freq energy dominates
+        if e_hihat > e_kick * 2.5:  s *= 0.25
+        scores["kick"] = max(0.0, s)
 
-        # Snare: mid frequency with noise component
-        if 150 <= spectral_centroid <= 400 and zero_crossing_rate > 0.1:
-            scores["snare"] *= 1.3
+        # --- SNARE: mid centroid + noise (ZCR) ---
+        s = 0.0
+        if 600 <= centroid <= 4000:    s += 3.5
+        elif 300 <= centroid < 600:    s += 1.5
+        if 0.08 <= zcr <= 0.28:        s += 3.0
+        elif zcr > 0.28:               s += 0.5   # too noisy → cymbal
+        s += e_snare * 4.0
+        s += e_tom_mid * 0.8
+        scores["snare"] = max(0.0, s)
 
-        # Hi-hat: high frequency, sharp attack
-        if spectral_centroid > 5000 and zero_crossing_rate > 0.15:
-            scores["hihat"] *= 1.4
+        # --- HI-HAT (closed): very high centroid, high ZCR, sharp ---
+        s = 0.0
+        if centroid > 7000:     s += 4.0
+        elif centroid > 5000:   s += 2.5
+        if zcr > 0.20:          s += 3.5
+        elif zcr > 0.15:        s += 2.0
+        s += e_hihat * 5.0
+        if e_kick > e_hihat * 3.0:  s *= 0.2   # not a cymbal if kick dominates
+        scores["hi-hat"] = max(0.0, s)
 
-        # Crash: very high frequency, sustained
-        if spectral_rolloff > 8000:
-            scores["crash"] *= 1.2
+        # --- HIHAT OPEN: like hi-hat but slightly lower centroid / rolloff ---
+        s = 0.0
+        if 4000 <= centroid <= 8000:    s += 2.5
+        if 0.10 <= zcr <= 0.22:         s += 2.0
+        s += e_hihat * 3.5
+        s += e_crash * 0.8
+        if 5000 <= rolloff <= 10000:    s += 1.5
+        scores["hihat_open"] = max(0.0, s)
 
-        # Find the drum type with highest score
-        if not scores or max(scores.values()) == 0:
-            return "unknown", 0.0
+        # --- RIDE: mid-high centroid, moderate ZCR, sustained ring ---
+        s = 0.0
+        if 3500 <= centroid <= 7500:    s += 3.0
+        if 0.06 <= zcr <= 0.16:         s += 2.5
+        s += e_crash * 2.5
+        s += e_hihat * 1.5
+        if 5000 <= rolloff <= 11000:    s += 2.0
+        # Distinguish from crash: ride has narrower, more focused spectrum
+        if zcr < 0.18 and rolloff < 11000:  s += 1.0
+        scores["ride"] = max(0.0, s)
 
-        best_drum = max(scores.keys(), key=lambda k: scores[k])
-        max_score = scores[best_drum]
+        # --- CRASH: high centroid, high ZCR, broad spectrum ---
+        s = 0.0
+        if centroid > 5000:     s += 2.5
+        elif centroid > 3500:   s += 1.0
+        if zcr > 0.17:          s += 3.0
+        elif zcr > 0.12:        s += 1.5
+        if rolloff > 9000:      s += 2.5
+        elif rolloff > 7000:    s += 1.0
+        s += e_crash * 4.0
+        s += e_hihat * 1.5
+        scores["crash"] = max(0.0, s)
 
-        # Normalize confidence (simple normalization)
-        total_energy = sum(scores.values())
-        confidence = max_score / total_energy if total_energy > 0 else 0.0
-        confidence = min(1.0, confidence * 2)  # Scale and cap at 1.0
+        # --- TOM1 (high tom): centroid ~350-750 Hz, low ZCR ---
+        s = 0.0
+        if 350 <= centroid <= 800:      s += 4.0
+        elif 250 <= centroid < 350:     s += 1.5
+        if zcr < 0.07:                  s += 2.5
+        elif zcr < 0.11:                s += 1.0
+        s += e_tom_high * 5.0
+        s += e_tom_mid  * 1.0
+        if e_kick > e_tom_high * 3:     s *= 0.5
+        scores["tom1"] = max(0.0, s)
 
-        return best_drum, confidence
+        # --- TOM2 (mid tom): centroid ~200-420 Hz, low ZCR ---
+        s = 0.0
+        if 200 <= centroid <= 450:      s += 4.0
+        elif 150 <= centroid < 200:     s += 1.5
+        if zcr < 0.07:                  s += 2.5
+        elif zcr < 0.10:                s += 1.0
+        s += e_tom_mid  * 5.0
+        s += e_tom_low  * 1.5
+        scores["tom2"] = max(0.0, s)
+
+        # --- FLOOR TOM: centroid ~100-250 Hz, lower than kick usually ---
+        s = 0.0
+        if 100 <= centroid <= 280:      s += 4.0
+        elif 80 <= centroid < 100:      s += 2.0
+        if zcr < 0.07:                  s += 2.5
+        elif zcr < 0.10:                s += 1.0
+        s += e_tom_low  * 5.0
+        s += e_kick     * 0.5
+        # Floor tom centroid > kick centroid
+        if 150 <= centroid <= 300 and e_tom_low > e_kick:  s += 2.0
+        scores["floor_tom"] = max(0.0, s)
+
+        # --- FOOT HI-HAT: very low energy, low centroid —
+        # Hard to distinguish from kick without pedal data; use ZCR + low RMS
+        s = 0.0
+        if centroid < 300 and zcr < 0.08 and rms < 0.05:   s += 2.0
+        s += e_kick * 0.3
+        scores["foot_hihat"] = max(0.0, s)
+
+        # --- Cross-type disambiguation ---
+        # kick vs floor_tom: kick centroid < 150 Hz
+        if centroid < 150:
+            scores["kick"]      += 1.5
+            scores["floor_tom"] -= 1.0
+
+        # hi-hat vs crash: centroid > 7000 Hz → almost certainly hi-hat
+        if centroid > 7000:
+            scores["hi-hat"] += 2.0
+            scores["crash"]  -= 2.0
+
+        # hi-hat vs crash: zcr > 0.20 → more likely crash (broader)
+        if zcr > 0.20:
+            scores["crash"]  += 1.0
+            scores["ride"]   -= 0.5
+        elif zcr < 0.14 and 4500 < rolloff < 9500:
+            scores["ride"]   += 1.0
+            scores["crash"]  -= 0.5
+
+        # crash vs hi-hat: very high rolloff shared — boost both slightly
+        if rolloff > 13000:
+            scores["crash"]  += 0.5
+            scores["hi-hat"] += 0.5
+
+        # hihat_open vs ride: if hihat band energy dominates, favour open hi-hat
+        if e_hihat > e_crash * 1.5:
+            scores["hihat_open"] += 1.5
+            scores["ride"]       -= 1.0
+
+        # Clip negatives
+        scores = {k: max(0.0, v) for k, v in scores.items()}
+
+        total = sum(scores.values())
+        if total == 0.0:
+            return "snare", 0.0   # fallback
+
+        best = max(scores, key=lambda k: scores[k])
+        confidence = min(1.0, (scores[best] / total) * 1.5)
+
+        return best, confidence
 
     async def _post_process_events(self, events: List[DrumEvent]) -> List[DrumEvent]:
         """

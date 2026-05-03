@@ -20,9 +20,24 @@ class Settings(BaseSettings):
     # Development settings
     DEBUG: bool = False
 
+    # CORS — comma-separated list of allowed origins
+    ALLOWED_ORIGINS: str = Field(
+        default="http://localhost:3000,http://127.0.0.1:3000",
+        description="Comma-separated list of allowed CORS origins",
+    )
+
+    def get_allowed_origins(self) -> list:
+        return [o.strip() for o in self.ALLOWED_ORIGINS.split(",") if o.strip()]
+
     # File storage settings
     UPLOAD_DIR: str = "uploads"
     MAX_FILE_SIZE: int = 100 * 1024 * 1024  # 100MB
+
+    # External ML service (running on port 8001)
+    ML_SERVICE_URL: str = Field(
+        default="http://127.0.0.1:8001",
+        description="Base URL of the external ML drum analysis service",
+    )
 
     # =========================
     # 2FA / OTP settings

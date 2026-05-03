@@ -46,7 +46,7 @@ notation_service = NotationService()
 async def generate_notation(
     raw_request: Request,
     db: AsyncSession = Depends(get_db),
-    current_user: Optional[User] = Depends(get_optional_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Generate musical notation from drum detection results.
@@ -67,6 +67,8 @@ async def generate_notation(
         except (ValueError, AttributeError):
             return False
 
+    # POST /notation/ always requires auth (get_current_user already enforces it).
+    # Demo mode only applies to the GET endpoints for non-UUID ids.
     if not _is_uuid(video_id_raw):
         now = datetime.utcnow()
         demo_notation_id = str(uuid4())
@@ -111,10 +113,6 @@ async def generate_notation(
             "message": "Notation generated in demo mode",
         }
 
-    # --- Real mode: requires auth ---
-    if current_user is None:
-        raise HTTPException(status_code=401, detail="Authentication required")
-
     try:
         video_id = UUID(video_id_raw)
     except ValueError:
@@ -122,6 +120,81 @@ async def generate_notation(
 
     try:
         drum_events = body.get("drum_events", [])
+
+        # If no drum_events provided, delegate to the ML pipeline
+        # (same code path as POST /ml/analyze-video/{video_id})
+        if not drum_events:
+            import logging as _logging
+            logger = _logging.getLogger(__name__)
+
+            from app.modules.ml.router import run_video_analysis
+            from app.modules.media.service import VideoService as _VideoService
+            from app.modules.media.repository import VideoRepository as _VideoRepo
+
+            async def _try_auto_extract():
+                """Auto-extract audio when not yet in DB."""
+                _video_repo = _VideoRepo()
+                video_row = await _video_repo.get_by_id(db, video_id)
+                if not video_row:
+                    raise HTTPException(404, "Video not found.")
+                # Always use the video's owner as the user_id for extraction
+                uid = UUID(str(video_row.user_id))
+                svc = _VideoService()
+                try:
+                    await svc.initiate_audio_extraction(db=db, video_id=video_id, user_id=uid)
+                    logger.info("Auto-extracted audio for video %s", video_id)
+                except Exception as _ex:
+                    logger.warning("Auto-extract failed for video %s: %s", video_id, _ex)
+
+            try:
+                ml_result = await run_video_analysis(video_id, db)
+            except HTTPException as exc:
+                if exc.status_code == 404:
+                    # Audio not in DB yet — try extracting it, then retry once
+                    await _try_auto_extract()
+                    try:
+                        ml_result = await run_video_analysis(video_id, db)
+                    except HTTPException as exc2:
+                        raise HTTPException(
+                            422,
+                            "No audio file found for this video. "
+                            "Extract audio first via POST /videos/{video_id}/extract-audio.",
+                        ) from exc2
+                else:
+                    raise
+
+            drum_events = ml_result["drum_events"]
+
+            # Use librosa beat-tracking tempo unless the caller supplied one
+            if not body.get("tempo_bpm"):
+                body["tempo_bpm"]      = ml_result["tempo_bpm"]
+                body["time_signature"] = body.get("time_signature") or ml_result["time_signature"]
+
+            logger.info(
+                "ML analysis routed through run_video_analysis: "
+                "%d events, tempo=%.1f BPM, ts=%s, instruments=%s",
+                ml_result["total_events"],
+                body["tempo_bpm"],
+                body["time_signature"],
+                list(ml_result.get("instrument_counts", {}).keys()),
+            )
+
+        elif drum_events:
+            # Normalize already-provided dict events if they use alternate keys
+            drum_events = [
+                {
+                    "time_seconds": float(
+                        e.get("time_seconds", e.get("timestamp", 0))
+                    ),
+                    "instrument": str(
+                        e.get("instrument", e.get("drum_type", "unknown"))
+                    ),
+                    "velocity": float(e.get("velocity", 0.5)),
+                    "confidence": float(e.get("confidence", 0.0)),
+                }
+                for e in drum_events
+            ]
+
         notation = await notation_service.generate_notation_from_drum_detection(
             db=db,
             video_id=video_id,
@@ -144,35 +217,20 @@ async def get_notation(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    """Get basic notation information. Returns demo data for unauthenticated users or missing notations."""
-    # Try to resolve user from token (never raise 401)
-    current_user = None
-    try:
-        from jose import jwt as _jwt
-        from app.core.config import settings as _settings
-        from app.modules.users.repository import UserRepository as _UserRepo
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:]
-            payload = _jwt.decode(token, _settings.SECRET_KEY, algorithms=[_settings.ALGORITHM])
-            email = payload.get("sub")
-            if email:
-                current_user = await _UserRepo().get_by_email(db, email=email)
-    except Exception:
-        current_user = None
-
-    # Try DB lookup if authenticated
+    """Get basic notation information. Reads from DB by UUID — no auth required."""
+    # Always try DB lookup by ID first (notation UUID is the access credential)
     notation = None
-    if current_user is not None:
-        try:
+    try:
+        notation = await notation_service.notation_repo.get_by_id(db, notation_id)
+        if not notation:
             notation = await notation_service.notation_repo.get_by_video_id(db, notation_id)
-        except Exception:
-            notation = None
+    except Exception:
+        notation = None
 
     if notation is not None:
         return notation
 
-    # Demo fallback — notation not in DB or user not authenticated
+    # Demo fallback — notation not found in DB
     from datetime import datetime
     now = datetime.utcnow().isoformat()
     return {
@@ -194,28 +252,14 @@ async def get_notation_with_details(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    """Get complete notation with measures, beats, notes. Returns demo data if not found."""
-    current_user = None
-    try:
-        from jose import jwt as _jwt
-        from app.core.config import settings as _settings
-        from app.modules.users.repository import UserRepository as _UserRepo
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:]
-            payload = _jwt.decode(token, _settings.SECRET_KEY, algorithms=[_settings.ALGORITHM])
-            email = payload.get("sub")
-            if email:
-                current_user = await _UserRepo().get_by_email(db, email=email)
-    except Exception:
-        current_user = None
-
+    """Get complete notation with measures, beats, notes. Reads from DB by UUID — no auth required."""
     notation = None
-    if current_user is not None:
-        try:
-            notation = await notation_service.get_notation_with_details(db, notation_id)
-        except Exception:
-            notation = None
+    try:
+        notation = await notation_service.notation_repo.get_by_id(db, notation_id)
+        if not notation:
+            notation = await notation_service.notation_repo.get_by_video_id(db, notation_id)
+    except Exception:
+        notation = None
 
     if notation is not None:
         return notation
@@ -589,40 +633,43 @@ async def download_notation_pdf(
 ):
     """
     Generate and download a PDF drum chart for the given notation.
-    Works for both authenticated users (real data) and demo mode.
+    Reads from DB by notation UUID — no auth required (UUID is the access token).
+    Falls back to demo data only when the notation is not found in the DB.
     """
-    # Try to fetch real notation if authenticated
     notation_data: dict = {}
-    current_user = None
+
+    # Always try DB lookup by notation UUID first — no auth gate
     try:
-        from jose import jwt as _jwt
-        from app.core.config import settings as _settings
-        from app.modules.users.repository import UserRepository as _UserRepo
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:]
-            payload = _jwt.decode(token, _settings.SECRET_KEY, algorithms=[_settings.ALGORITHM])
-            email = payload.get("sub")
-            if email:
-                current_user = await _UserRepo().get_by_email(db, email=email)
-    except Exception:
-        current_user = None
-
-    if current_user is not None:
-        try:
+        db_notation = await notation_service.notation_repo.get_by_id(db, notation_id)
+        if not db_notation:
+            # Fallback: maybe the caller passed the video_id instead of the notation_id
             db_notation = await notation_service.notation_repo.get_by_video_id(db, notation_id)
-            if db_notation:
-                notation_data = {
-                    "notation_json": getattr(db_notation, "notation_json", {}) or {},
-                    "tempo": getattr(db_notation, "tempo_bpm", 95) or 95,
-                    "time_signature": getattr(db_notation, "time_signature", "4/4") or "4/4",
-                    "created_at": str(getattr(db_notation, "created_at", "") or ""),
-                }
-        except Exception:
-            pass
+        if db_notation:
+            nj = getattr(db_notation, "notation_json", None) or {}
+            notation_data = {
+                "notation_json": nj,
+                "tempo": getattr(db_notation, "tempo", None) or 95,
+                "time_signature": getattr(db_notation, "time_signature", None) or "4/4",
+                "created_at": str(getattr(db_notation, "created_at", "") or ""),
+            }
+            import logging as _log
+            _log.getLogger(__name__).info(
+                "PDF download: notation %s found in DB — %d measures, tempo=%s",
+                notation_id,
+                len(nj.get("measures", [])),
+                notation_data["tempo"],
+            )
+    except Exception as _e:
+        import logging as _log
+        _log.getLogger(__name__).warning("PDF download DB lookup failed: %s", _e)
 
-    # Demo data fallback
-    if not notation_data:
+    # Demo data fallback — only when notation genuinely not found in DB
+    if not notation_data or not notation_data.get("notation_json", {}).get("measures"):
+        import logging as _log
+        _log.getLogger(__name__).warning(
+            "PDF download: notation %s not found in DB or has no measures — using demo data",
+            notation_id,
+        )
         notation_data = {
             "notation_json": {
                 "measures": [
