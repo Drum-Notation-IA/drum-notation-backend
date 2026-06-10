@@ -31,6 +31,19 @@ class StrokeEventSchema(BaseModel):
     confidence_score: Optional[float] = Field(
         None, ge=0, le=1, description="Detection confidence"
     )
+    # --- NEW additive ML fields (optional, backward compatible) ---
+    dominant_band: Optional[str] = Field(
+        None, description='Spectral band: "low" | "mid" | "high"'
+    )
+    grid_type: Optional[str] = Field(
+        None, description='Rhythmic grid: "straight" | "triplet"'
+    )
+    velocity_midi: Optional[int] = Field(
+        None, ge=0, le=127, description="Raw MIDI velocity (1..127)"
+    )
+    subdivision_index: Optional[int] = Field(
+        None, description="Subdivision index within the beat"
+    )
 
 
 class DrumNoteSchema(BaseModel):
@@ -47,6 +60,19 @@ class DrumNoteSchema(BaseModel):
         None, ge=0, le=1, description="Detection confidence"
     )
     timestamp_seconds: float = Field(..., ge=0, description="Absolute timestamp")
+    # --- NEW additive ML fields (optional, backward compatible) ---
+    dominant_band: Optional[str] = Field(
+        None, description='Spectral band: "low" | "mid" | "high"'
+    )
+    grid_type: Optional[str] = Field(
+        None, description='Rhythmic grid: "straight" | "triplet"'
+    )
+    velocity_midi: Optional[int] = Field(
+        None, ge=0, le=127, description="Raw MIDI velocity (1..127)"
+    )
+    subdivision_index: Optional[int] = Field(
+        None, description="Subdivision index within the beat"
+    )
 
 
 class NotationBeatSchema(BaseModel):
@@ -125,6 +151,13 @@ class GenerateNotationRequest(BaseModel):
         default="sixteenth", description="Quantization level"
     )
     apply_ai_analysis: bool = Field(default=True, description="Apply AI analysis")
+    min_confidence: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Confidence floor: 0 = full transcription (ghost notes/rolls), "
+        "higher = cleaner chart (strong hits only)",
+    )
 
     @validator("time_signature")
     def validate_time_signature(cls, v):
@@ -257,6 +290,9 @@ class DetailedNotationResponse(DrumNotationResponse):
     )
     exports: List[NotationExportSchema] = Field(
         default_factory=list, description="Export history"
+    )
+    ml_provenance: Optional[Dict[str, Any]] = Field(
+        None, description="ML service metadata and provenance"
     )
 
 

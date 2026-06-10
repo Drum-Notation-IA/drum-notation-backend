@@ -17,6 +17,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.openai_service import OpenAIService
 from app.modules.notation.models import DrumNotation
+from app.modules.notation.stack_aggregator import (
+    AggregatorConfig,
+    StackAggregator,
+)
 from app.modules.notation.repository import (
     DrumKitMappingRepository,
     DrumNotationRepository,
@@ -54,6 +58,9 @@ class NotationService:
             "tom2": {"staff_position": "G4", "note_head": "normal", "line": 2},
             "floor_tom": {"staff_position": "D4", "note_head": "normal", "line": 0},
             "cowbell": {"staff_position": "G5", "note_head": "triangle", "line": 4},
+            # Canonical "hi-hat" alias (the ML pipeline normalises hihat/
+            # hihat_closed → "hi-hat"); mirrors hihat_closed staff position.
+            "hi-hat": {"staff_position": "F#5", "note_head": "x", "line": 4},
         }
 
     async def generate_notation_from_drum_detection(
@@ -65,18 +72,46 @@ class NotationService:
         time_signature: str = "4/4",
         quantization_level: str = "sixteenth",
         apply_ai_analysis: bool = True,
+        ml_provenance: Optional[Dict[str, Any]] = None,
+        min_confidence: Optional[float] = None,
     ) -> DrumNotation:
         """
-        Generate complete musical notation from drum detection results
+        Generate complete musical notation from drum detection results.
+
+        ``ml_provenance`` (when supplied by the ML pipeline) is persisted in
+        ``notation_json["ml_provenance"]`` so the frontend can show whether
+        the notation was produced by the upstream ML service or by the local
+        fallback, plus model confidence and quantization metadata.
+
+        ``min_confidence`` (0..1) filters out low-confidence strokes so callers
+        can request a clean chart (strong hits only) instead of the full
+        transcription (ghost notes / rolls included). Defaults to the
+        configured ``DEFAULT_MIN_CONFIDENCE`` when not provided.
         """
         try:
+            from app.core.config import settings as _cfg
+            if min_confidence is None:
+                min_confidence = float(getattr(_cfg, "DEFAULT_MIN_CONFIDENCE", 0.0))
+
             # Calculate basic metrics; allow 0 events (generates empty/minimal notation)
             estimated_tempo = tempo_bpm or (self._estimate_tempo_from_events(drum_events) if drum_events else 120.0)
 
+            # ML quantization metadata (subdivision/grid steps) drives triplet
+            # placement; pulled from provenance when the ML pipeline supplied it.
+            ml_quantization = (
+                (ml_provenance or {}).get("ml_metadata", {}).get("quantization", {})
+                if ml_provenance else {}
+            )
+
             # Generate the complete notation structure
             notation_json = await self._generate_complete_notation(
-                drum_events, estimated_tempo, time_signature, quantization_level
+                drum_events, estimated_tempo, time_signature, quantization_level,
+                min_confidence=min_confidence, ml_quantization=ml_quantization,
             )
+
+            # Persist ML provenance + analysis stats so the frontend has them
+            if ml_provenance is not None:
+                notation_json["ml_provenance"] = ml_provenance
 
             # Create the main notation record with all data
             notation = await self.notation_repo.create_notation(
@@ -106,22 +141,54 @@ class NotationService:
         tempo_bpm: float,
         time_signature: str,
         quantization_level: str,
+        min_confidence: float = 0.0,
+        ml_quantization: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Generate complete notation structure as JSON
+        Generate complete notation structure as JSON.
+
+        When the events carry the ML rhythmic grid (measure / beat /
+        subdivision_index / grid_type) we group them with :class:`StackAggregator`
+        — preserving polyphonic stacks and keeping straight vs. triplet grids
+        separate — in a single O(n) pass. Otherwise we fall back to the legacy
+        time-based quantisation (used by the fully local detector path).
         """
+        ml_quantization = ml_quantization or {}
+
+        # Confidence filter (clean vs complete transcription). Single O(n) pass
+        # shared by the timeline and the measure builder.
+        if min_confidence and min_confidence > 0.0:
+            filtered_events = [
+                e for e in drum_events
+                if float(e.get("confidence") or 0.0) >= min_confidence
+            ]
+        else:
+            filtered_events = drum_events
+
+        use_ml_grid = any(
+            e.get("ml_measure") is not None and e.get("ml_subdivision") is not None
+            for e in filtered_events
+        )
+
         # Generate musical structure
         musical_structure = self._generate_musical_structure(
-            drum_events, tempo_bpm, time_signature, quantization_level
+            filtered_events, tempo_bpm, time_signature, quantization_level
         )
 
-        # Generate stroke timeline
-        timeline = self._generate_stroke_timeline(drum_events, musical_structure)
+        # Generate stroke timeline (forwards the new ML fields too)
+        timeline = self._generate_stroke_timeline(filtered_events, musical_structure)
 
         # Generate measures with beats and notes
-        measures = self._generate_measures_from_events(
-            drum_events, tempo_bpm, time_signature, quantization_level
-        )
+        if use_ml_grid:
+            measures = self._build_measures_from_ml_grid(
+                filtered_events, tempo_bpm, time_signature,
+                min_confidence=0.0,  # already filtered above
+                ml_quantization=ml_quantization,
+            )
+        else:
+            measures = self._generate_measures_from_events(
+                filtered_events, tempo_bpm, time_signature, quantization_level
+            )
 
         # Build complete notation JSON
         notation_json = {
@@ -131,19 +198,69 @@ class NotationService:
             "drum_mapping": self.default_drum_mapping,
             "metadata": {
                 "total_duration_seconds": max(
-                    event.get("time_seconds", 0) for event in drum_events
+                    event.get("time_seconds", 0) for event in filtered_events
                 )
-                if drum_events
+                if filtered_events
                 else 0,
                 "total_measures": len(measures),
-                "total_events": len(drum_events),
+                "total_events": len(filtered_events),
                 "quantization_level": quantization_level,
+                "min_confidence": min_confidence,
+                "grid_aware": use_ml_grid,
                 "generated_at": datetime.utcnow().isoformat(),
             },
             "exports": [],  # Will be populated when exports are generated
         }
 
         return notation_json
+
+    def _build_measures_from_ml_grid(
+        self,
+        drum_events: List[Dict[str, Any]],
+        tempo_bpm: float,
+        time_signature: str,
+        min_confidence: float = 0.0,
+        ml_quantization: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Build measures by grouping events on the ML rhythmic grid.
+
+        Uses :class:`StackAggregator` so simultaneous strokes (kick+snare+hihat)
+        become a single chord at one rhythmic position, and triplet events are
+        placed on their own subdivision grid instead of being snapped onto the
+        straight 16th grid.
+        """
+        ml_quantization = ml_quantization or {}
+        beats_per_measure = self._get_beats_per_measure(time_signature)
+        denom = self._get_time_signature_denominator(time_signature)
+
+        # Derive grid resolution from the ML quantization block when present.
+        subdivision = ml_quantization.get("subdivision")
+        if subdivision:
+            spb_straight = max(1, round(float(subdivision) / float(denom)))
+        else:
+            spb_straight = 4  # 16th notes in x/4
+
+        grid_step = ml_quantization.get("grid_step_seconds")
+        triplet_step = ml_quantization.get("triplet_step_seconds")
+        if grid_step and triplet_step:
+            spb_triplet = max(1, round(spb_straight * (float(grid_step) / float(triplet_step))))
+        else:
+            spb_triplet = max(1, round(spb_straight * 3 / 4))
+
+        config = AggregatorConfig(
+            min_confidence=min_confidence,
+            subdivisions_per_beat_straight=spb_straight,
+            subdivisions_per_beat_triplet=spb_triplet,
+        )
+        aggregator = StackAggregator(config)
+        stacks = aggregator.aggregate(drum_events)
+        return aggregator.to_measures(
+            stacks,
+            tempo_bpm=tempo_bpm,
+            time_signature=time_signature,
+            beats_per_measure=beats_per_measure,
+            drum_mapping=self.default_drum_mapping,
+        )
 
     def _generate_musical_structure(
         self,
@@ -224,6 +341,18 @@ class NotationService:
                 "ghost_note": velocity < 0.3,
                 "confidence_score": event.get("confidence", None),
             }
+
+            # Forward ML metadata when available
+            for extra_key in (
+                "model_confidence", "max_probability", "heuristic",
+                "ml_measure", "ml_beat", "ml_subdivision",
+                "ml_grid_index", "quant_error_ms", "raw_time",
+                # NEW additive ML fields
+                "dominant_band", "grid_type", "velocity_midi",
+                "strength", "peak_rel", "quantized_time",
+            ):
+                if extra_key in event and event[extra_key] is not None:
+                    stroke_event[extra_key] = event[extra_key]
 
             timeline.append(stroke_event)
 
@@ -339,6 +468,18 @@ class NotationService:
                 "timestamp_seconds": time_seconds,
                 "beat_number": round(beat_number, 4),
             }
+
+            # Preserve ML metadata if the upstream pipeline supplied it
+            for extra_key in (
+                "model_confidence", "max_probability", "heuristic",
+                "ml_measure", "ml_beat", "ml_subdivision",
+                "ml_grid_index", "quant_error_ms", "raw_time",
+                # NEW additive ML fields
+                "dominant_band", "grid_type", "velocity_midi",
+                "strength", "peak_rel", "quantized_time",
+            ):
+                if extra_key in event and event[extra_key] is not None:
+                    note[extra_key] = event[extra_key]
 
             slots.setdefault(slot_index, []).append(note)
 
@@ -617,6 +758,13 @@ class NotationService:
         try:
             numerator = int(time_signature.split("/")[0])
             return numerator
+        except Exception:
+            return 4
+
+    def _get_time_signature_denominator(self, time_signature: str) -> int:
+        """Get the beat unit (denominator) from a time signature like 4/4."""
+        try:
+            return int(time_signature.split("/")[1])
         except Exception:
             return 4
 

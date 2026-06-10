@@ -39,6 +39,21 @@ class Settings(BaseSettings):
         description="Base URL of the external ML drum analysis service",
     )
 
+    # Upper bound on the number of ML events the backend will ingest from a
+    # single /analyze response. The enriched ML service can emit thousands of
+    # events; this keeps the pipeline bounded against pathological inputs.
+    MAX_ML_EVENTS: int = Field(
+        default=100_000, ge=1, description="Max ML events ingested per analysis"
+    )
+
+    # Default confidence floor applied when building notation. 0.0 keeps the
+    # full transcription (ghost notes / rolls); raise it for a cleaner chart.
+    # Callers can override per-request via the `min_confidence` parameter.
+    DEFAULT_MIN_CONFIDENCE: float = Field(
+        default=0.0, ge=0.0, le=1.0,
+        description="Default confidence floor for notation building",
+    )
+
     # =========================
     # 2FA / OTP settings
     # =========================

@@ -45,12 +45,22 @@ notation_service = NotationService()
 @router.post("/", status_code=201)
 async def generate_notation(
     raw_request: Request,
+    min_confidence: Optional[float] = Query(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="Confidence floor: 0 = full transcription (ghost notes/rolls), "
+        "higher = cleaner chart (strong hits only). Overrides the body value.",
+    ),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
     Generate musical notation from drum detection results.
     Supports demo mode for non-UUID video IDs (no auth required).
+
+    ``min_confidence`` can be supplied either as a query parameter (takes
+    precedence) or in the JSON body, for a clean vs. complete transcription.
     """
     try:
         body = await raw_request.json()
@@ -120,6 +130,7 @@ async def generate_notation(
 
     try:
         drum_events = body.get("drum_events", [])
+        ml_result: Optional[dict] = None
 
         # If no drum_events provided, delegate to the ML pipeline
         # (same code path as POST /ml/analyze-video/{video_id})
@@ -165,35 +176,62 @@ async def generate_notation(
 
             drum_events = ml_result["drum_events"]
 
-            # Use librosa beat-tracking tempo unless the caller supplied one
+            # Use ML's tempo + time signature unless the caller overrode them.
+            # The ML service's tempo is generally more accurate than the
+            # librosa beat-tracker because it averages over the full track.
             if not body.get("tempo_bpm"):
                 body["tempo_bpm"]      = ml_result["tempo_bpm"]
                 body["time_signature"] = body.get("time_signature") or ml_result["time_signature"]
 
             logger.info(
-                "ML analysis routed through run_video_analysis: "
-                "%d events, tempo=%.1f BPM, ts=%s, instruments=%s",
+                "Notation pipeline: %d events, tempo=%.1f BPM, ts=%s, "
+                "ml_classifications_used=%s, instruments=%s",
                 ml_result["total_events"],
                 body["tempo_bpm"],
                 body["time_signature"],
+                ml_result.get("ml_classifications_used", False),
                 list(ml_result.get("instrument_counts", {}).keys()),
             )
 
         elif drum_events:
-            # Normalize already-provided dict events if they use alternate keys
-            drum_events = [
-                {
-                    "time_seconds": float(
-                        e.get("time_seconds", e.get("timestamp", 0))
-                    ),
-                    "instrument": str(
-                        e.get("instrument", e.get("drum_type", "unknown"))
-                    ),
-                    "velocity": float(e.get("velocity", 0.5)),
-                    "confidence": float(e.get("confidence", 0.0)),
-                }
-                for e in drum_events
-            ]
+            # Normalize already-provided dict events if they use alternate keys.
+            # We preserve every extra field (e.g. ml_measure, model_confidence)
+            # so callers can pass through ML output untouched.
+            normalised: List[dict] = []
+            for e in drum_events:
+                base = dict(e)  # keep extras (ml_measure, grid_type, dominant_band, …)
+                base["time_seconds"] = float(
+                    e.get("time_seconds", e.get("timestamp", 0))
+                )
+                base["instrument"] = str(
+                    e.get("instrument", e.get("drum_type", "unknown"))
+                )
+                # Velocity may arrive normalised (0..1) or as raw MIDI (1..127).
+                # Keep a normalised "velocity" and a raw "velocity_midi".
+                raw_vel = e.get("velocity", 0.5)
+                try:
+                    raw_vel_f = float(raw_vel)
+                except (TypeError, ValueError):
+                    raw_vel_f = 0.5
+                if raw_vel_f > 1.0:
+                    base["velocity_midi"] = int(round(raw_vel_f))
+                    base["velocity"] = max(0.0, min(1.0, raw_vel_f / 127.0))
+                else:
+                    base["velocity"] = max(0.0, min(1.0, raw_vel_f))
+                    if base.get("velocity_midi") is None:
+                        base["velocity_midi"] = int(round(base["velocity"] * 127))
+                base["confidence"] = float(e.get("confidence", 0.0))
+                # Mirror raw ML grid keys onto the backend's ml_* keys so the
+                # grid-aware builder can group them even when callers pass the
+                # ML response straight through.
+                if base.get("ml_measure") is None and e.get("measure") is not None:
+                    base["ml_measure"] = e.get("measure")
+                if base.get("ml_beat") is None and e.get("beat") is not None:
+                    base["ml_beat"] = e.get("beat")
+                if base.get("ml_subdivision") is None and e.get("subdivision_index") is not None:
+                    base["ml_subdivision"] = e.get("subdivision_index")
+                normalised.append(base)
+            drum_events = normalised
 
         notation = await notation_service.generate_notation_from_drum_detection(
             db=db,
@@ -203,8 +241,23 @@ async def generate_notation(
             time_signature=body.get("time_signature", "4/4"),
             quantization_level=body.get("quantization_level", "sixteenth"),
             apply_ai_analysis=body.get("apply_ai_analysis", True),
+            min_confidence=(
+                min_confidence if min_confidence is not None
+                else body.get("min_confidence")
+            ),
+            ml_provenance=({
+                "ml_service_used":         ml_result.get("ml_service_used", False),
+                "ml_classifications_used": ml_result.get("ml_classifications_used", False),
+                "ml_backend":              ml_result.get("ml_backend"),
+                "ml_metadata":             ml_result.get("ml_metadata", {}),
+                "instrument_counts":       ml_result.get("instrument_counts", {}),
+                "duration_seconds":        ml_result.get("duration_seconds"),
+                "processing_time_seconds": ml_result.get("processing_time_seconds"),
+            } if ml_result else None),
         )
         return notation
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Failed to generate notation: {str(e)}"
@@ -228,7 +281,20 @@ async def get_notation(
         notation = None
 
     if notation is not None:
-        return notation
+        # Extract ml_provenance from notation_json for frontend
+        response_dict = {
+            "id": notation.id,
+            "video_id": notation.video_id,
+            "tempo": notation.tempo,
+            "time_signature": notation.time_signature,
+            "created_at": notation.created_at,
+            "updated_at": notation.updated_at,
+            "notation_json": notation.notation_json,
+        }
+        # Add ml_provenance if available
+        if notation.notation_json and "ml_provenance" in notation.notation_json:
+            response_dict["ml_provenance"] = notation.notation_json["ml_provenance"]
+        return response_dict
 
     # Demo fallback — notation not found in DB
     from datetime import datetime
@@ -262,7 +328,24 @@ async def get_notation_with_details(
         notation = None
 
     if notation is not None:
-        return notation
+        # Extract ml_provenance from notation_json for frontend
+        response_dict = {
+            "id": notation.id,
+            "video_id": notation.video_id,
+            "tempo": notation.tempo,
+            "time_signature": notation.time_signature,
+            "created_at": notation.created_at,
+            "updated_at": notation.updated_at,
+            "notation_json": notation.notation_json,
+            "musical_structure": notation.get_musical_structure(),
+            "timeline": notation.get_timeline(),
+            "measures": notation.get_measures(),
+            "exports": notation.notation_json.get("exports", []),
+        }
+        # Add ml_provenance if available
+        if notation.notation_json and "ml_provenance" in notation.notation_json:
+            response_dict["ml_provenance"] = notation.notation_json["ml_provenance"]
+        return response_dict
 
     from datetime import datetime
     now = datetime.utcnow().isoformat()
